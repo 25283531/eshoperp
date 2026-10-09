@@ -67,8 +67,13 @@ def _attach_sqlite_pragmas(engine: AsyncEngine, busy_timeout_ms: int = 8000) -> 
             logger.warning("sqlite_pragma_failed", error=f"{type(exc).__name__}: {exc}")
 
 
-def _ensure_sqlite_parent_dir(url: str) -> None:
-    """确保 SQLite 文件所在目录存在（避免首次启动时目录不存在而报错）。"""
+def ensure_sqlite_parent_dir(url: str) -> None:
+    """确保 SQLite 文件所在目录存在（避免首次启动时目录不存在而报错）。
+
+    ★ 为什么要**公开**：迁移脚本（`alembic/env.py`）自己建引擎，不走 `get_engine()`，
+      首次启动时同样需要先有这个目录，否则 `alembic upgrade head` 会先于应用失败。
+      对外暴露出来，让"建库"这件事在两条路径上用的是同一份逻辑，而不是各写一遍。
+    """
     if not url.startswith("sqlite"):
         return
     # sqlite+aiosqlite:///C:/path/data/erp.db  →  取 /// 之后的部分
@@ -88,7 +93,7 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
 
     settings = settings or get_settings()
     url = settings.database_url
-    _ensure_sqlite_parent_dir(url)
+    ensure_sqlite_parent_dir(url)
 
     if url.startswith("sqlite"):
         # SQLite：单写者模型，使用 NullPool 减少跨线程/跨事件循环的连接复用风险
@@ -235,7 +240,7 @@ def build_async_engine(url: str, echo: bool = False) -> AsyncEngine:
                 poolclass=StaticPool,
                 connect_args={"check_same_thread": False},
             )
-        _ensure_sqlite_parent_dir(url)
+        ensure_sqlite_parent_dir(url)
         engine = create_async_engine(url, echo=echo, future=True, poolclass=NullPool,
                                      connect_args={"check_same_thread": False})
         # ★ 以前这条分支**没有** PRAGMA：`alembic upgrade head` 建出来的新库

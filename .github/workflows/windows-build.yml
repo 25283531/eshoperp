@@ -96,6 +96,12 @@ jobs:
         working-directory: backend
         env:
           ERP_NO_BROWSER: "1"
+          # ★ 固定端口，不走自动顺延。
+          #   自动顺延是为"双击 exe 的人"准备的：端口冲突时换一个并提示。
+          #   但 CI 里如果让它漂走，校验脚本就会拿 8000 上一个**毫不相干的进程**
+          #   当成被测 exe —— 测试"通过"了，测的却不是被测物，比直接红掉危险得多。
+          #   显式指定后，端口被占会让 exe 直接报错退出，失败原因一目了然。
+          ERP_PORT: "8000"
         run: |
           $exe = Join-Path (Get-Location) 'dist/erp/erp.exe'
           Write-Host "exe 路径：$exe"
