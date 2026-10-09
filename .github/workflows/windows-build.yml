@@ -1,0 +1,156 @@
+name: Windows 桌面应用构建
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 构建并冒烟验证 Windows exe
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          # ★ 与本地开发机保持一致（本机实测项目跑在 3.11，且依赖齐全）。
+          #   不要随手升到最新：PyInstaller 与部分预编译 wheel 对新版本跟进较慢。
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # ★ 管理端令牌由 Secrets 注入，绝不落进版本库
+      #   写进 .env.local 而非 .env.development：前者已在 .gitignore 中，不会被提交，
+      #   且 Vite 的加载优先级里 .env.local 高于 .env.development，能正确覆盖。
+      - name: 注入前端构建环境变量
+        working-directory: web
+        env:
+          VITE_ADMIN_TOKEN: ${{ secrets.VITE_ADMIN_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:VITE_ADMIN_TOKEN)) {
+            Write-Host "::warning::未配置 secret VITE_ADMIN_TOKEN —— 本次产物的管理端功能将不可用，其余功能不受影响。如需管理端，请在仓库 Settings -> Secrets 中配置后重跑。"
+          }
+          # WriteAllText 默认 UTF-8 无 BOM，避免 BOM 导致 Vite 解析 .env 出错
+          $path = Join-Path (Get-Location) '.env.local'
+          [System.IO.File]::WriteAllText($path, "VITE_ADMIN_TOKEN=$env:VITE_ADMIN_TOKEN")
+          Write-Host "已写入 .env.local（该文件已在 .gitignore 中，不会入库）"
+
+      - name: 安装前端依赖并构建
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: 核对前端产物
+        working-directory: web
+        run: |
+          if (-not (Test-Path 'dist/index.html')) {
+            throw 'web/dist/index.html 不存在 —— 前端构建没有产出，继续打包只会得到一个打开是空白的 exe'
+          }
+          Write-Host "前端产物 OK：dist/index.html 存在"
+
+      - name: 安装后端依赖
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: PyInstaller 打包
+        working-directory: backend
+        run: pyinstaller --noconfirm --clean ../build/erp-windows.spec
+
+      # ★★ 这一步是整个工作流的重点 ★★
+      # 只做到"构建成功"是不够的：打包缺失 hidden import 的典型症状恰恰是
+      # 「构建全绿，exe 一跑就崩」。必须真的把它跑起来验一次。
+      - name: 冒烟验证 exe
+        working-directory: backend
+        env:
+          ERP_NO_BROWSER: "1"
+        run: |
+          $exe = Join-Path (Get-Location) 'dist/erp/erp.exe'
+          Write-Host "exe 路径：$exe"
+          if (-not (Test-Path $exe)) { throw "未找到 exe：$exe" }
+
+          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Minimized
+          Write-Host "已启动 PID=$($proc.Id)"
+          try {
+            # 若进程秒退，说明打包有问题，立刻带上退出码失败
+            Start-Sleep -Seconds 5
+            if ($proc.HasExited) {
+              throw "exe 启动后立刻退出（exit=$($proc.ExitCode)）—— 通常是缺失依赖或数据文件"
+            }
+
+            $healthy = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Seconds 2
+              try {
+                $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/v1/health' `
+                                       -UseBasicParsing -TimeoutSec 5
+                if ($r.StatusCode -eq 200) {
+                  Write-Host "健康检查 OK：$($r.Content)"
+                  $healthy = $true
+                  break
+                }
+              } catch { }
+            }
+            if (-not $healthy) { throw 'exe 启动后 85 秒内 /api/v1/health 未返回 200' }
+
+            # 前端页面也必须真的能打开（否则等于只验证了一半）
+            $page = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/' -UseBasicParsing -TimeoutSec 5
+            if ($page.Content -notmatch '<html') {
+              throw "根路径未返回前端页面，实际内容：$($page.Content)"
+            }
+            Write-Host '前端首页 OK（exe 内嵌静态资源生效）'
+
+            # SPA 深链回退也要验证：直接访问二级路由应拿到同一份 HTML
+            $deep = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/publish-tasks' `
+                                      -UseBasicParsing -TimeoutSec 5
+            if ($deep.Content -notmatch '<html') { throw 'SPA 深链回退失效' }
+            Write-Host 'SPA 深链回退 OK'
+          } finally {
+            if (-not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Write-Host '已停止测试进程'
+            }
+          }
+
+      - name: 压缩为分发包
+        working-directory: backend
+        run: |
+          Compress-Archive -Path 'dist/erp/*' -DestinationPath 'erp-windows.zip'
+          $size = (Get-Item 'erp-windows.zip').Length / 1MB
+          Write-Host ("产物大小：{0:N1} MB" -f $size)
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: erp-windows-portable
+          path: backend/erp-windows.zip
+          retention-days: 30
+
+      - name: 随 Release 发布（仅打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: backend/erp-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

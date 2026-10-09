@@ -1,0 +1,4 @@
+﻿商品编码,商品标题,类目,供应商ID,商品成本价,原链接,主图URL,商品状态,SKU编码,规格名,规格值,SKU成本价,售价,库存,备注
+DEMO-1001,纯棉圆领短袖T恤 夏季薄款,女装/上装/T恤,1,18.00,https://example.com/item/DEMO-1001,https://example.com/img/DEMO-1001-1.jpg,on_sale,DEMO-1001-RED-XL,颜色;尺码,红色;XL,18.00,59.90,200,示例行：多规格用英文分号分隔
+DEMO-1001,,,,,,,,DEMO-1001-BLUE-L,颜色;尺码,蓝色;L,17.50,55.90,150,同一商品的第二行：商品编码相同即可
+DEMO-1002,304不锈钢保温杯 500ml,家居/水具/保温杯,1,22.00,https://example.com/item/DEMO-1002,https://example.com/img/DEMO-1002-1.jpg,on_sale,,容量,500ml,,49.00,80,SKU编码留空 ⇒ 由「商品编码 + 规格指纹」自动生成

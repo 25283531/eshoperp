@@ -1,0 +1,167 @@
+# ============================================================================
+#  妙手（Miaoshou）适配器 profile
+#  ---------------------------------------------------------------------------
+#  ★ 重要声明：妙手开放接口的**端点路径、请求字段名、响应字段名均未实测确认**
+#    （ARCH §11.1 Q2 / PRD Q2）。本文件是"可配置模板"，不是真实契约。
+#
+#  · 所有不确定的字段均已标注 `# TODO: 需实测确认`；
+#  · 代码中对 TODO 字段做**防御性解析**：字段缺失 / 类型不符时返回默认值，绝不崩溃；
+#  · 实测后只改本 YAML（或后台适配器配置），**不改代码**。
+#
+#  实测方法：在「系统设置 → 适配器 → 妙手 → 连通性自检」发一次真实请求，
+#  把返回的 JSON 结构贴回本文件的 response_mapping 即可。
+# ============================================================================
+
+adapter_name: miaoshou
+display_name: 妙手
+version: 0.1.0-todo
+
+# ---------------- 连接 ----------------
+base_url: ""            # TODO: 需实测确认 —— 妙手开放接口根地址（如 https://open.miaoshou.com/api）
+timeout_sec: 20.0
+max_retry: 3
+retry_backoff_sec: 0.5
+verify_ssl: true
+
+# ---------------- 鉴权 / 签名 ----------------
+# TODO: 需实测确认 —— 妙手的签名算法、参数名、app_key/app_secret 的传递方式均未确认
+auth:
+  app_key_param: app_key           # TODO: 需实测确认（可能是 appKey / appid / client_id）
+  app_key_credential: app_key
+  secret_credential: app_secret
+  timestamp_param: timestamp       # TODO: 需实测确认（可能是 ts / _t）
+  sign_param: sign                 # TODO: 需实测确认
+  sign_algo: md5                   # 可选：md5 / hmac_sha256 / none
+
+# ---------------- 端点 ----------------
+# 约定：path 支持 {占位符} 渲染；request 模板中 "{xxx}" 取自调用上下文；
+#       response_mapping 用点分路径取值，支持列表下标（如 data.list.0.tracking_no）。
+endpoints:
+
+  fetch_orders:
+    method: POST
+    path: /order/list              # TODO: 需实测确认
+    request:
+      shop_ids: "{shop_ids}"       # TODO: 需实测确认（可能是数组而非逗号串）
+      start_time: "{updated_from}"
+      end_time: "{updated_to}"
+      page: "{page}"
+      page_size: "{page_size}"
+    response:
+      total:   data.total          # TODO: 需实测确认
+      orders:  data.list           # TODO: 需实测确认
+    # 单条订单的字段映射（orders 数组内每个元素）
+    order_mapping:
+      platform_order_no:  order_no        # TODO: 需实测确认（可能是 tid / order_id / order_sn）
+      shop_id:            shop_id         # TODO: 需实测确认
+      total_amount_cents: pay_amount      # TODO: 需实测确认金额单位（元 or 分）
+      paid_at:            pay_time        # TODO: 需实测确认时间格式
+      buyer_info_enc:     buyer_nick      # TODO: 需实测确认（可能已是密文/脱敏）
+      receiver_addr_enc:  receiver_address # TODO: 需实测确认
+      items:              items           # TODO: 需实测确认子订单字段路径
+      item_sku_code:      outer_sku_id    # TODO: 需实测确认（店铺 SKU 编码字段名）
+      item_shop_item_id:  outer_item_id   # TODO: 需实测确认（店铺商品 ID 字段名）
+    note: "拉取订单（未实测，字段待确认）"
+    unverified: true
+
+  place_purchase_order:
+    method: POST
+    path: /purchase/create         # TODO: 需实测确认
+    request:
+      out_order_no: "{platform_order_no}"  # TODO: 需实测确认
+      item_id:      "{source_product_1688_id}"
+      sku_id:       "{source_sku_code_1688}"
+      quantity:     "{quantity}"
+      address:      "{receiver_enc}"       # TODO: 需实测确认：妙手是否接受密文地址
+      remark:       "{remark}"
+    response:
+      purchase_order_no: data.purchase_order_no  # TODO: 需实测确认（可能是 order_id / trade_no）
+      amount_cents:      data.amount              # TODO: 需实测确认金额单位
+      status:            data.status              # TODO: 需实测确认状态枚举
+    note: "1688 采购下单（未实测）"
+    unverified: true
+
+  fetch_tracking_no:
+    method: POST
+    path: /logistics/trace         # TODO: 需实测确认
+    request:
+      purchase_order_no: "{purchase_order_no}"
+    response:
+      logistics_company: data.logistics_company  # TODO: 需实测确认
+      tracking_no:       data.tracking_no        # TODO: 需实测确认
+      shipped_at:        data.ship_time          # TODO: 需实测确认
+    note: "获取物流单号（未实测）"
+    unverified: true
+
+  write_back_tracking:
+    method: POST
+    path: /logistics/writeback     # TODO: 需实测确认
+    request:
+      out_order_no:      "{platform_order_no}"
+      logistics_company: "{logistics_company}"
+      tracking_no:       "{tracking_no}"
+    response:
+      success: data.success        # TODO: 需实测确认
+      message: data.message
+    note: "回填物流单号到店铺（未实测）"
+    unverified: true
+
+  submit_refund:
+    method: POST
+    path: /refund/create           # TODO: 需实测确认
+    request:
+      out_order_no:   "{platform_order_no}"
+      refund_amount:  "{refund_amount_cents}"   # TODO: 需实测确认金额单位
+      reason:         "{reason}"
+    response:
+      accepted:       data.success              # TODO: 需实测确认
+      refund_1688_no: data.refund_no            # TODO: 需实测确认
+      message:        data.message
+    note: "提交 1688 退款（未实测）"
+    unverified: true
+
+  get_return_address:
+    method: POST
+    path: /refund/address          # TODO: 需实测确认
+    request:
+      purchase_order_no: "{purchase_order_no}"
+    response:
+      receiver_name_enc: data.receiver_name     # TODO: 需实测确认
+      phone_enc:         data.phone             # TODO: 需实测确认
+      province:          data.province
+      city:              data.city
+      district:          data.district
+      detail:            data.address_detail    # TODO: 需实测确认
+    note: "获取 1688 退货地址（未实测）"
+    unverified: true
+
+  push_inventory_change:
+    method: POST
+    path: /inventory/push          # TODO: 需实测确认
+    request:
+      sku_code:    "{source_sku_code_1688}"
+      stock_qty:   "{stock_qty}"
+      cost_cents:  "{cost_cents}"
+      change_type: "{change_type}"
+    response:
+      accepted: data.success       # TODO: 需实测确认
+    note: "推送库存 / 价格变动（未实测）"
+    unverified: true
+
+# ---------------- 能力矩阵默认值（可被后台配置覆盖）----------------
+capabilities:
+  fetch_orders:          { level: supported,   fallback: manual,     unverified: true, note: "拉取订单（待实测）" }
+  match_sku:             { level: unsupported, fallback: null,       unverified: false, note: "★ 映射权威源在自研侧，始终用本地 sku_mapping" }
+  place_purchase_order:  { level: supported,   fallback: csv_export, unverified: true, note: "1688 采购下单（待实测）" }
+  fetch_tracking_no:     { level: supported,   fallback: manual,     unverified: true, note: "获取物流单号（待实测）" }
+  write_back_tracking:   { level: supported,   fallback: manual,     unverified: true, note: "回填物流单号（待实测）" }
+  submit_refund:         { level: supported,   fallback: manual,     unverified: true, note: "提交 1688 退款（待实测）" }
+  get_return_address:    { level: supported,   fallback: manual,     unverified: true, note: "获取退货地址（待实测）" }
+  push_inventory_change: { level: supported,   fallback: null,       unverified: true, note: "推送库存 / 价格变动（待实测）" }
+
+# ---------------- scope 声明（★ 送 scope_guard 校验，越权一律拒绝）----------------
+required_scopes:
+  - order.read
+  - logistics.write
+
+docs_url: ""            # TODO: 需实测确认 —— 官方接口文档地址

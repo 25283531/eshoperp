@@ -1,0 +1,33 @@
+# ---- Web 框架 ----
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20          # 文件上传（映射 CSV 导入）
+
+# ---- 数据校验与配置 ----
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# ---- ORM 与迁移 ----
+SQLAlchemy==2.0.36
+alembic==1.14.0
+aiosqlite==0.20.0                 # SQLite 异步驱动（默认库）
+asyncpg==0.30.0                   # PostgreSQL 异步驱动（切库时启用）
+greenlet>=3.1.1                   # SQLAlchemy asyncio 必需（Windows 上不会随主包自动装全）
+
+# ---- 异步任务（替代 Celery + Redis）----
+APScheduler==3.10.4
+
+# ---- HTTP 客户端 ----
+httpx==0.28.1
+
+# ---- 安全与加密 ----
+cryptography==44.0.0              # AES-256 凭证加密
+
+# ---- 日志 ----
+structlog==24.4.0
+
+# ---- 配置/文件处理 ----
+PyYAML==6.0.2                     # 适配器 profile YAML
+
+# ---- 工具 ----
+python-dateutil==2.9.0.post0

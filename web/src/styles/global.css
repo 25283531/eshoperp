@@ -1,0 +1,80 @@
+/* 极少量全局布局补充样式（本项目不使用 Tailwind，避免与 antd class 体系冲突） */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
+  background-color: #f5f7fa;
+}
+
+/* 页面操作区与内容区间距 */
+.erp-page-content {
+  padding: 16px;
+}
+
+/* 顶栏 Mock 模式提示条 */
+.erp-mock-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  line-height: 24px;
+  background-color: #fff7e6;
+  border-bottom: 1px solid #ffd591;
+  color: #ad6800;
+}
+
+/* 图片对比（原图 vs 重绘图）容器 */
+.erp-compare-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.erp-compare-block img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+
+/* 违禁词高亮 */
+.erp-banned-word {
+  padding: 0 2px;
+  color: #a8071a;
+  background-color: #fff1f0;
+  border-bottom: 2px solid #ff4d4f;
+  border-radius: 2px;
+}
+
+/* 表格内等宽字体（SKU 编码 / 追踪 ID） */
+.erp-mono {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+}
+
+/**
+ * ★ F10（架构 v1.13 / PRD SYS-P1-03）危险组合行高亮：
+ *   `is_enabled = true`（适配器在跑） + `scope_check_status = rejected`（权限声明被拒）。
+ *   后端越权时**不会**自动停用适配器，这两个字段会合法地组合出
+ *   "适配器在跑但权限声明被拒"的危险状态；若把启用态与校验态合并成一列展示，
+ *   这个组合会被藏起来、没人看得见，所以必须分列 + 整行红色高亮。
+ */
+.erp-row-danger > td {
+  background-color: #fff1f0 !important;
+}
+
+.erp-row-danger:hover > td {
+  background-color: #ffe0de !important;
+}

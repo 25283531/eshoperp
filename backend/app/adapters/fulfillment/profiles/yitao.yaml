@@ -1,0 +1,144 @@
+# ============================================================================
+#  逸淘（Yitao）适配器 profile
+#  ---------------------------------------------------------------------------
+#  ★ 重要声明：逸淘开放接口的**端点路径、请求字段名、响应字段名均未实测确认**
+#    （ARCH §11.1 Q2 / PRD Q2）。本文件是"可配置模板"，不是真实契约。
+#
+#  · 所有不确定的字段均已标注 `# TODO: 需实测确认`；
+#  · 代码中对 TODO 字段做**防御性解析**：字段缺失 / 类型不符时返回默认值，绝不崩溃；
+#  · 实测后只改本 YAML（或后台适配器配置），**不改代码**。
+#
+#  与妙手的差异（MVP 基线能力矩阵）：
+#    submit_refund / get_return_address 声明为 **unsupported**（保守起见），
+#    实测确认可用后把下面的 level 改为 supported 即可，无需改代码。
+# ============================================================================
+
+adapter_name: yitao
+display_name: 逸淘
+version: 0.1.0-todo
+
+base_url: ""            # TODO: 需实测确认 —— 逸淘开放接口根地址
+timeout_sec: 20.0
+max_retry: 3
+retry_backoff_sec: 0.5
+verify_ssl: true
+
+# TODO: 需实测确认 —— 逸淘的鉴权方式（可能是 Bearer Token 而非 app_key 签名）
+auth:
+  app_key_param: app_key           # TODO: 需实测确认
+  app_key_credential: app_key
+  secret_credential: app_secret
+  timestamp_param: timestamp       # TODO: 需实测确认
+  sign_param: sign                 # TODO: 需实测确认
+  sign_algo: md5                   # 可选：md5 / hmac_sha256 / none
+
+endpoints:
+
+  fetch_orders:
+    method: POST
+    path: /api/order/list          # TODO: 需实测确认
+    request:
+      shop_id:   "{shop_ids}"      # TODO: 需实测确认（逸淘可能只支持单店铺）
+      begin_time: "{updated_from}"
+      end_time:   "{updated_to}"
+      page_no:   "{page}"          # TODO: 需实测确认（page_no vs page）
+      page_size: "{page_size}"
+    response:
+      total:  data.count           # TODO: 需实测确认
+      orders: data.rows            # TODO: 需实测确认
+    order_mapping:
+      platform_order_no:  order_sn         # TODO: 需实测确认
+      shop_id:            shop_id          # TODO: 需实测确认
+      total_amount_cents: total_fee        # TODO: 需实测确认金额单位
+      paid_at:            created_at       # TODO: 需实测确认时间字段
+      buyer_info_enc:     buyer_info       # TODO: 需实测确认
+      receiver_addr_enc:  address          # TODO: 需实测确认
+      items:              order_items      # TODO: 需实测确认
+      item_sku_code:      sku_code         # TODO: 需实测确认
+      item_shop_item_id:  item_id          # TODO: 需实测确认
+    note: "拉取订单（未实测，字段待确认）"
+    unverified: true
+
+  place_purchase_order:
+    method: POST
+    path: /api/purchase/submit     # TODO: 需实测确认
+    request:
+      order_sn: "{platform_order_no}"       # TODO: 需实测确认
+      goods_id: "{source_product_1688_id}"
+      sku_code: "{source_sku_code_1688}"
+      num:      "{quantity}"                # TODO: 需实测确认（num vs quantity）
+      address:  "{receiver_enc}"            # TODO: 需实测确认：逸淘是否接受密文地址
+    response:
+      purchase_order_no: data.purchase_no   # TODO: 需实测确认
+      amount_cents:      data.pay_amount    # TODO: 需实测确认金额单位
+      status:            data.state         # TODO: 需实测确认
+    note: "1688 采购下单（未实测）"
+    unverified: true
+
+  fetch_tracking_no:
+    method: POST
+    path: /api/logistics/query     # TODO: 需实测确认
+    request:
+      purchase_no: "{purchase_order_no}"
+    response:
+      logistics_company: data.company       # TODO: 需实测确认
+      tracking_no:       data.no            # TODO: 需实测确认
+      shipped_at:        data.delivery_time # TODO: 需实测确认
+    note: "获取物流单号（未实测）"
+    unverified: true
+
+  write_back_tracking:
+    method: POST
+    path: /api/logistics/push      # TODO: 需实测确认
+    request:
+      order_sn:          "{platform_order_no}"
+      logistics_company: "{logistics_company}"
+      tracking_no:       "{tracking_no}"
+    response:
+      success: data.result         # TODO: 需实测确认
+      message: data.msg
+    note: "回填物流单号到店铺（未实测）"
+    unverified: true
+
+  # submit_refund / get_return_address：MVP 声明为不支持（实测可用后再启用）
+  # 启用方法：取消下方注释并在 capabilities 中把 level 改为 supported
+  # submit_refund:
+  #   method: POST
+  #   path: /api/refund/apply      # TODO: 需实测确认
+  #   request:
+  #     order_sn: "{platform_order_no}"
+  #     amount:   "{refund_amount_cents}"
+  #     reason:   "{reason}"
+  #   response:
+  #     accepted: data.result      # TODO: 需实测确认
+  #     refund_1688_no: data.refund_sn
+  #   unverified: true
+
+  push_inventory_change:
+    method: POST
+    path: /api/inventory/sync      # TODO: 需实测确认
+    request:
+      sku_code:    "{source_sku_code_1688}"
+      stock_qty:   "{stock_qty}"
+      cost_cents:  "{cost_cents}"
+      change_type: "{change_type}"
+    response:
+      accepted: data.result        # TODO: 需实测确认
+    note: "推送库存 / 价格变动（未实测）"
+    unverified: true
+
+capabilities:
+  fetch_orders:          { level: supported,   fallback: manual,     unverified: true, note: "拉取订单（待实测）" }
+  match_sku:             { level: unsupported, fallback: null,       unverified: false, note: "★ 映射权威源在自研侧，始终用本地 sku_mapping" }
+  place_purchase_order:  { level: supported,   fallback: csv_export, unverified: true, note: "1688 采购下单（待实测）" }
+  fetch_tracking_no:     { level: supported,   fallback: manual,     unverified: true, note: "获取物流单号（待实测）" }
+  write_back_tracking:   { level: supported,   fallback: manual,     unverified: true, note: "回填物流单号（待实测）" }
+  submit_refund:         { level: unsupported, fallback: manual,     unverified: true, note: "退款能力未确认，暂声明不支持（实测后改本行即可）" }
+  get_return_address:    { level: unsupported, fallback: manual,     unverified: true, note: "退货地址能力未确认，暂声明不支持（实测后改本行即可）" }
+  push_inventory_change: { level: supported,   fallback: null,       unverified: true, note: "推送库存 / 价格变动（待实测）" }
+
+required_scopes:
+  - order.read
+  - logistics.write
+
+docs_url: ""            # TODO: 需实测确认

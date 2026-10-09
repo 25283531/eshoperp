@@ -1,0 +1,59 @@
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---------------- 虚拟环境 ----------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------- 环境变量 ----------------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ---------------- 运行时数据（★ 含 SQLite / 素材 / 凭证密文，绝不入库）----------------
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---------------- 前端 ----------------
+node_modules/
+web/dist/
+web/build/
+web/.vite/
+*.tsbuildinfo
+
+# ---------------- 编辑器 / 系统 ----------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------- 日志 ----------------
+*.log
+logs/
+
+# ---------------- WorkBuddy 项目数据 ----------------
+# 含协作过程记忆（决策依据、踩坑记录、业务隐私），是工具数据不是源码，不入库
+.workbuddy/
