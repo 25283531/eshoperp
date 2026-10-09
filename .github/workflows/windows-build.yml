@@ -74,9 +74,20 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # 先确认打包配置在位。这一��看似多余，但它防的是一类很难查的失效：
+      # spec 若落在被 .gitignore 排除的目录里，**本地一切正常、远端却永远没有这个文件**，
+      # 失败信息只有一句 "Spec file not found"，不说为什么。
+      - name: 核对打包配置
+        working-directory: backend
+        run: |
+          if (-not (Test-Path '../packaging/erp-windows.spec')) {
+            throw 'packaging/erp-windows.spec 缺失。若本地存在而远端没有，请检查该文件是否被 .gitignore 排除'
+          }
+          Write-Host '打包配置 OK'
+
       - name: PyInstaller 打包
         working-directory: backend
-        run: pyinstaller --noconfirm --clean ../build/erp-windows.spec
+        run: pyinstaller --noconfirm --clean ../packaging/erp-windows.spec
 
       # ★★ 这一步是整个工作流的重点 ★★
       # 只做到"构建成功"是不够的：打包缺失 hidden import 的典型症状恰恰是

@@ -43,6 +43,19 @@ OWNER = "25283531"
 REPO = "eshoperp"
 BRANCH = "main"
 
+# ★ 构建必需文件清单。这里是为了**提前拦截**一类极难排查的失效：
+#   某文件被 .gitignore 静默排除，于是本地一切正常、远端却永远没有它，
+#   直到 CI 跑到那一步才报一句毫无线索的 "file not found"。
+#   真实案例：PyInstaller spec 放在 build/ 下被通用规则吞掉。
+REQUIRED_PATHS = [
+    ".github/workflows/windows-build.yml",
+    "packaging/erp-windows.spec",
+    "backend/desktop_entry.py",
+    "backend/requirements.txt",
+    "web/package.json",
+    "web/package-lock.json",
+]
+
 _req_count = 0
 
 
@@ -195,10 +208,33 @@ def main() -> int:
     ref = api("GET", f"{base}/git/ref/heads/{args.branch}", token=token)
     if ref.get("__error__"):
         remote_sha = None
-        print("远端分支不存在 → 按**空仓库**处理（创建根 commit）")
+        print("远端分支不存在 → 按**空仓库**处理")
     else:
         remote_sha = ref["object"]["sha"]
         print(f"远端 {args.branch} = {remote_sha[:8]} → 增量推送")
+
+    if remote_sha is None:
+        # ★ GitHub 的一个硬性限制：完全空的仓库调 `POST /git/blobs` 会返回
+        #   "Git Repository is empty." —— 必须先存在一个 commit，Git Data API 才可用。
+        #   解决办法：用 Contents API 落一个初始文件，凭它产生第一个 commit。
+        #   本地仓库本身就有 README.md，随后那次提交会把这个文件覆盖成正式版本。
+        print("   空仓库无法直接用 Git Data API 建 blob，先用 Contents API 生成初始 commit")
+        seed = api(
+            "PUT", f"{base}/contents/README.md",
+            {
+                "message": "chore: 初始化仓库",
+                "content": base64.b64encode(b"# eshoperp\n").decode("ascii"),
+                "branch": args.branch,
+            },
+            token=token,
+        )
+        if seed.get("__error__"):
+            raise RuntimeError(f"创建初始 commit 失败: {seed['__error__']}")
+        ref = api("GET", f"{base}/git/ref/heads/{args.branch}", token=token)
+        if ref.get("__error__"):
+            raise RuntimeError(f"创建初始 commit 后仍读不到 ref: {ref['__error__']}")
+        remote_sha = ref["object"]["sha"]
+        print(f"   初始 commit 已建立：{remote_sha[:8]}")
 
     # 远端已有的 blob 不必重传
     known: set[str] = set()
