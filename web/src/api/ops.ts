@@ -6,6 +6,8 @@ import { http } from './client';
 import type {
   AfterSaleVo,
   AutoOfflineRecordVo,
+  BackupListVo,
+  BackupResultVo,
   InventoryAlertVo,
   InventoryConfigVo,
   InventorySnapshotVo,
@@ -180,4 +182,19 @@ export function updateInventoryConfig(
   body: Partial<InventoryConfigVo>,
 ): Promise<InventoryConfigVo> {
   return http.put<InventoryConfigVo>('/inventory/config', body, undefined, { admin: true });
+}
+
+/**
+ * POST /system/backup —— 一键备份。
+ *
+ * ★ 备份的是**整个 data/ 目录**，不是只拷 erp.db。
+ *   只拷 erp.db 会静默丢素材与 AI 产出（应用照常启动、只是素材全空）。
+ */
+export function createBackup(): Promise<BackupResultVo> {
+  return http.post<BackupResultVo>('/system/backup', undefined, undefined, { admin: true });
+}
+
+/** GET /system/backups —— 备份历史列表（按时间倒序） */
+export function listBackups(limit = 20): Promise<BackupListVo> {
+  return http.get<BackupListVo>('/system/backups', { limit }, { admin: true });
 }

@@ -1,0 +1,49 @@
+# 减小构建上下文、避免把本地状态打进镜像
+
+# ---- 版本控制与工具数据 ----
+.git
+.github
+.workbuddy
+.vscode
+.idea
+
+# ---- Python ----
+**/__pycache__/
+**/*.py[cod]
+**/*.pyi
+backend/.venv/
+backend/venv/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/dist/
+backend/build/
+**/*.egg-info/
+
+# ---- Node ----
+web/node_modules/
+web/dist/
+web/.vite/
+web/coverage/
+
+# ---- 数据（★ 绝对不能进镜像：会覆盖挂载、且可能带上本机真实数据）----
+data/
+backend/data/
+**/erp.db
+**/*.db
+**/*.sqlite3
+**/uvicorn*.log
+**/server_out.log
+**/*.log
+
+# ---- 环境变量与本地配置 ----
+**/.env
+**/.env.*
+!**/.env.example
+web/.env.local
+web/.env.development
+
+# ---- 桌面打包残留（exe 形态已废弃，见 Dockerfile 说明）----
+packaging/
+*.spec
+backend/dist/

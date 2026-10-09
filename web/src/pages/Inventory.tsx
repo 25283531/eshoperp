@@ -64,6 +64,21 @@ const DEFAULT_FILTERS: InventoryFilterValues = {
 };
 
 /** 涨幅百分比渲染（change_rate 为字符串比例，如 "0.1234"） */
+/**
+ * 告警的库存数据源展示文案（F11）。
+ *
+ * ⚠️ 硬约束：`unknown` 必须映射为「未知」并如实显示，
+ *    **严禁回落成「自动同步」** —— 回落会把"没有数据"伪装成"有可信数据"，
+ *    直接绕过 §4.8 的自动下架门槛（L5 / 第 15 条反复提防的失效形态）。
+ */
+const DATA_SOURCE_LABEL: Record<string, string> = {
+  erp_poll: '自动同步',
+  third_party_push: '第三方推送',
+  manual_import: '手工维护',
+  manual_edit: '手工编辑',
+  unknown: '未知',
+};
+
 function renderRate(value: string | null | undefined): JSX.Element {
   const num = value === null || value === undefined ? Number.NaN : Number(value);
   if (!Number.isFinite(num)) return <span>-</span>;
@@ -235,7 +250,33 @@ export default function Inventory(): JSX.Element {
         title: '建议动作',
         dataIndex: 'suggested_action',
         width: 110,
-        render: (value: string) => (value === 'offline' ? <Tag color="red">下架</Tag> : <Tag>通知</Tag>),
+        // ★ 文案必须带「建议」前缀：这一列是**尚未发生**的建议动作，
+        //   红色 + 光秃秃的"下架"会被误读成"已下架"。配色同步改橙。
+        render: (value: string) =>
+          value === 'offline' ? <Tag color="orange">建议下架</Tag> : <Tag>建议通知</Tag>,
+      },
+      {
+        // ★ F11：库存数据源。后端字段 `data_source`
+        //   （erp_poll / manual_import / third_party_push / manual_edit / unknown）
+        //   ⚠️ 硬约束：`unknown` 必须显式显示「未知」，**严禁回落成「自动同步」** ——
+        //      回落会把"没有数据"伪装成"有可信数据"，直接绕过 §4.8 自动下架门槛。
+        title: '库存数据源',
+        dataIndex: 'data_source',
+        width: 110,
+        render: (value: string | null) => <Tag>{DATA_SOURCE_LABEL[value ?? 'unknown'] ?? '未知'}</Tag>,
+      },
+      {
+        // ★ F11：可否自动下架。false ⇒ 只告警、不自动执行，需人工确认后一键下架。
+        title: '可否自动下架',
+        dataIndex: 'auto_offline_allowed',
+        width: 120,
+        render: (value: boolean | null) =>
+          value ? (
+            <Tag color="orange">可自动下架</Tag>
+          ) : (
+            // 措辞必须能表达「系统不会替你执行」，避免使用者误以为已下架
+            <Tag>仅告警·需人工确认</Tag>
+          ),
       },
       { title: '检测时间', dataIndex: 'detected_at', width: 170, render: (v: string) => formatTime(v) },
     ],

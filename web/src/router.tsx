@@ -9,6 +9,7 @@ import {
   LockOutlined,
   NodeIndexOutlined,
   CloudUploadOutlined,
+  CloudDownloadOutlined,
   RobotOutlined,
   RollbackOutlined,
   SafetyCertificateOutlined,
@@ -25,6 +26,7 @@ import ListingProducts from './pages/ListingProducts';
 import Orders from './pages/Orders';
 import PublishTasks from './pages/PublishTasks';
 import SettingsAdapters from './pages/SettingsAdapters';
+import SettingsBackup from './pages/SettingsBackup';
 import SettingsCredentials from './pages/SettingsCredentials';
 import SettingsPermissions from './pages/SettingsPermissions';
 import SkuMappings from './pages/SkuMappings';
@@ -134,6 +136,12 @@ export const menuGroups: MenuGroup[] = [
         label: '审计日志',
         icon: <FileSearchOutlined />,
         element: <AuditLogs />,
+      },
+      {
+        path: '/settings/backup',
+        label: '数据备份',
+        icon: <CloudDownloadOutlined />,
+        element: <SettingsBackup />,
       },
     ],
   },

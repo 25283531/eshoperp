@@ -477,8 +477,10 @@ export interface MappingConflictVo {
   shop_sku_code: string | null;
   description: string | null;
   is_resolved: boolean;
-  /** 是否仅提示不拦截（P1 级冲突为 true） */
-  non_blocking?: boolean;
+  // ★ 原 `non_blocking?` 字段已删除：后端 `MappingConflictVo` 不产出该字段，
+  //   保留会让 `if (x.non_blocking)` 恒为 falsy，把 P1 非阻塞冲突误判成阻塞。
+  //   “是否阻塞”由 `ConflictBadge` 的 `resolveConflictBlocking(conflictTypes, blockingByValue)`
+  //   从枚举元数据现算，不需要后端下发。
   resolved_by: string | null;
   resolved_at: IsoTimeStr | null;
   detected_at: IsoTimeStr;
@@ -985,6 +987,10 @@ export interface InventoryAlertVo {
   threshold: string;
   suggested_action: 'offline' | 'notify';
   detected_at: IsoTimeStr;
+  /** ★ F11 库存数据源。后端 `InventoryService._fill_alert_source()` 回填。 */
+  data_source: string;
+  /** ★ F11 可否自动下架。false ⇒ 只告警，不自动执行，需人工一键下架。 */
+  auto_offline_allowed: boolean;
 }
 
 export interface AutoOfflineRecordVo {
@@ -1238,4 +1244,32 @@ export interface TaskRecordVo {
   result_json: Record<string, unknown> | null;
   trace_id: string | null;
   created_at: IsoTimeStr | null;
+}
+
+/** POST /system/backup 的返回体 */
+export interface BackupResultVo {
+  ok: boolean;
+  file_name: string;
+  /** 相对 data/ 的路径，方便直接到宿主机上取文件 */
+  path: string;
+  size_bytes: number;
+  /** 主库是否纳入了备份（非 SQLite 时为 false） */
+  db_included: boolean;
+  /** 超出保留上限被自动清理的旧备份数量 */
+  pruned: number;
+  operator: string | null;
+}
+
+/** GET /system/backups 的单条备份记录 */
+export interface BackupItemVo {
+  file_name: string;
+  path: string;
+  size_bytes: number;
+  created_at: IsoTimeStr;
+}
+
+export interface BackupListVo {
+  items: BackupItemVo[];
+  total: number;
+  max_keep: number;
 }

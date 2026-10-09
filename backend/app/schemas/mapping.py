@@ -210,11 +210,19 @@ class MappingConflictVo(BaseSchema):
     resolved_by: str | None = None
     resolved_at: str | None = None
     resolve_action: str | None = None
-    created_at: str | None = None
+    shop_sku_code: str | None = None
+    # ★ 输出键名统一为 `detected_at`（与前端其余 4 处同名字段一致）。
+    #   注意：右侧仍读 ORM 的 `created_at`，改名只发生在输出契约层。
+    detected_at: str | None = None
 
     @classmethod
-    def from_model(cls, model: Any) -> "MappingConflictVo":
-        """从 ORM 对象构造。"""
+    def from_model(cls, model: Any, shop_sku_code: str | None = None) -> "MappingConflictVo":
+        """从 ORM 对象构造。
+
+        `shop_sku_code` 由调用方**批量预取**后传入（避免 N+1）；
+        未传或关联不存在时保持 `None`，前端如实渲染为「未知」——
+        ★ fail-close：取不到就显示"未知"，**绝不伪造、绝不抛异常**。
+        """
         return cls(
             id=int(model.id or 0),
             sku_mapping_id=int(model.sku_mapping_id or 0),
@@ -226,7 +234,8 @@ class MappingConflictVo(BaseSchema):
             resolved_by=model.resolved_by,
             resolved_at=iso_or_none(model.resolved_at),
             resolve_action=model.resolve_action,
-            created_at=iso_or_none(model.created_at),
+            shop_sku_code=shop_sku_code,
+            detected_at=iso_or_none(model.created_at),
         )
 
 

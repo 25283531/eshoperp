@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from sqlalchemy import select
 
 from app.api.v1._common import enqueue_task, page_of
 from app.core.deps import CurrentOperator, DbSession
@@ -19,6 +20,7 @@ from app.core.errors import BusinessError, ErrorCode
 from app.core.pagination import PageParams, page_params
 from app.core.response import ApiResponse
 from app.models.enums import TaskType
+from app.models.mapping import SkuMapping
 from app.schemas.mapping import (
     DetectConflictsRequest,
     MappingChangeLogVo,
@@ -186,6 +188,22 @@ async def validate_mappings(
     return ApiResponse.ok(data=vo)
 
 
+async def _fetch_shop_sku_codes(session: Any, rows: list[Any]) -> dict[int, str | None]:
+    """批量预取冲突关联映射的店铺 SKU 编码，返回 {sku_mapping_id: shop_sku_code}。
+
+    ★ 一次查完（批量预取），不在循环里逐行查询，避免 N+1。
+      `sku_mapping_id` 可能为 0 或指向已删除映射 ⇒ 结果里查不到，
+      schema 层如实渲染为「未知」，不伪造、不抛异常。
+    """
+    ids = {int(r.sku_mapping_id) for r in rows if getattr(r, "sku_mapping_id", None)}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(SkuMapping.id, SkuMapping.shop_sku_code).where(SkuMapping.id.in_(ids))
+    )
+    return {int(row[0]): row[1] for row in result.all()}
+
+
 @router.get("/sku-mappings/conflicts", summary="冲突列表")
 async def list_conflicts(
     session: DbSession,
@@ -203,7 +221,14 @@ async def list_conflicts(
         page=params.page,
         page_size=params.page_size,
     )
-    return ApiResponse.ok(data=page_of([MappingConflictVo.from_model(r) for r in rows], total, params))
+    code_by_id = await _fetch_shop_sku_codes(session, rows)
+    return ApiResponse.ok(
+        data=page_of(
+            [MappingConflictVo.from_model(r, code_by_id.get(int(r.sku_mapping_id))) for r in rows],
+            total,
+            params,
+        )
+    )
 
 
 @router.post("/sku-mappings/detect-conflicts", status_code=202, summary="触发冲突检测（异步）")

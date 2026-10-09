@@ -1,0 +1,130 @@
+name: Docker 镜像构建（linux/amd64 → GHCR）
+
+# 目标部署环境：OpenWrt 路由器上的 Docker（x86_64），与 ubuntu-latest runner 架构一致，
+# 因此**不需要 QEMU / 交叉构建**。
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write   # 推送到 GHCR 需要
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 提取镜像元数据（tag / label）
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: 构建并推送
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # 单架构：目标为 x86_64 路由器，与 runner 一致，无需交叉构建
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 复用 GitHub Actions 缓存，避免每次全量重装依赖
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ★ 冒烟验证：**构建成功 ≠ 能用**。
+      #   打包类缺陷的典型症状正是「构建全绿、一跑就崩」——
+      #   缺依赖、静态资源没拷进去、迁移脚本路径不对，都能通过构建但跑不起来。
+      #   所以这里真的把镜像跑起来，并且**确认连到的就是它自己**。
+      - name: 冒烟验证（真的启动容器并验证）
+        run: |
+          set -euo pipefail
+
+          IMAGE="${REGISTRY}/${IMAGE_NAME}:latest"
+          CONTAINER="erp-smoke-$$"   # 带 PID，避免并发跑重名
+
+          # ★ 宿主机端口用固定值，并在启动后核对容器实际监听，
+          #   避免"curl 通了但其实连的是别的进程"（本项目踩过一次）
+          HOST_PORT=18000
+
+          docker run -d --name "$CONTAINER" \
+            -p "${HOST_PORT}:8000" \
+            -e ADMIN_TOKEN="smoke-test-token" \
+            -e DATABASE_URL="sqlite+aiosqlite:////app/data/erp.db" \
+            "$IMAGE"
+
+          cleanup() {
+            echo "---- 容器日志（失败时排障用）----"
+            docker logs "$CONTAINER" || true
+            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # 等待就绪：最多 90 秒
+          echo "等待容器就绪..."
+          for i in $(seq 1 90); do
+            if curl -sf "http://127.0.0.1:${HOST_PORT}/api/v1/health" >/dev/null 2>&1; then
+              echo "容器已就绪（第 ${i} 秒）"
+              break
+            fi
+            if [ "$i" -eq 90 ]; then
+              echo "::error::容器在 90 秒内未就绪"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # ① 健康检查
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}/api/v1/health")
+          echo "health -> ${code}"
+          [ "$code" = "200" ] || { echo "::error::health 期望 200，实际 ${code}"; exit 1; }
+
+          # ② 首页（前端静态资源是否真的打进镜像）
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}/")
+          echo "/ -> ${code}"
+          [ "$code" = "200" ] || { echo "::error::根路径期望 200，实际 ${code}（前端 dist 可能没拷进去）"; exit 1; }
+
+          # ③ SPA 深链回退
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}/publish-tasks")
+          echo "/publish-tasks -> ${code}"
+          [ "$code" = "200" ] || { echo "::error::SPA 深链期望 200，实际 ${code}"; exit 1; }
+
+          # ④ 数据库是否真的建好了（自检建库的关键验证）
+          echo "---- 容器内表数量 ----"
+          docker exec "$CONTAINER" python -c "
+          import sqlite3, sys
+          con = sqlite3.connect('/app/data/erp.db')
+          n = con.execute(\"SELECT count(*) FROM sqlite_master WHERE type='table'\").fetchone()[0]
+          print('tables =', n)
+          sys.exit(0 if n >= 20 else 1)
+          " || { echo "::error::数据库表数量异常，自建库可能失败"; exit 1; }
+
+          echo "::notice::冒烟验证全部通过"

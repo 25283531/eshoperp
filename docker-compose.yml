@@ -1,0 +1,50 @@
+# 自用电商 ERP —— 容器部署（目标：OpenWrt 路由器上的 Docker，linux/amd64）
+#
+# ★ 持久化设计（使用者明确要求「放一个目录，方便备份」）：
+#     宿主机 ./data/  ←→  容器 /app/data
+#   这是**唯一**需要备份/迁移的目录，内含：
+#     - erp.db           SQLite 主库
+#     - backups/         一键备份产物（也在这下面，跟着一起被备份与迁移）
+#     - 素材图片 / AI 产出
+#
+#   ⚠️ 只拷 erp.db 会**静默丢素材与 AI 产出**：应用照常启动、只是素材全空，
+#      属于不易察觉的丢失。这和 README 第 27 条为桌面形态定的规则一致。
+#
+# ★ 升级步骤：停容器 → 整个 data/ 目录拷贝走 → 换镜像 → 起容器。
+
+version: "3.8"
+
+services:
+  erp:
+    # 镜像来自 GitHub Actions 构建并推送到 GHCR（见 .github/workflows/docker-build.yml）
+    image: ghcr.io/25283531/eshoperp:latest
+    container_name: erp
+    restart: unless-stopped
+
+    ports:
+      # 左侧是宿主机端口，右侧是容器内端口。
+      # 路由器上若 8000 已被占用，只改左侧（如 "8080:8000"），右侧保持 8000。
+      - "8000:8000"
+
+    environment:
+      # ★ 必填：管理端令牌。
+      #   默认值 `admin-token` 写在代码里、是公开已知的，局域网内任何人都能调管理接口。
+      #   请改成自己的值。改完记得同步前端 VITE_ADMIN_TOKEN（构建期注入）。
+      - ADMIN_TOKEN=${ADMIN_TOKEN:?请设置 ADMIN_TOKEN，例如在同目录创建 .env 文件}
+
+      # 数据库路径。容器内固定位置，由下方 volume 挂到宿主机。
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/erp.db
+
+      # 素材与 AI 产出的存放目录，同上，落在挂载点内。
+      - STORAGE_DIR=/app/data
+
+      - TZ=Asia/Shanghai
+
+    volumes:
+      # ★ 唯一持久化挂载点。首次启动会自动建库（alembic upgrade head）。
+      - ./data:/app/data
+
+    # 资源约束（路由器内存常见 256MB–1GB，建议保留余量）：
+    # 若路由器内存紧张，取消下面注释按需调整；设太小会导致 OOM 被杀。
+    # mem_limit: 512m
+    # memswap_limit: 512m
