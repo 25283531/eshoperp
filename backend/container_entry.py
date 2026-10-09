@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -30,6 +31,10 @@ if str(BACKEND_DIR) not in sys.path:
 
 DEFAULT_HOST = "0.0.0.0"  # noqa: S104  容器必须监听全部地址，否则外部连不上
 DEFAULT_PORT = 8000
+
+# 前端运行时配置文件名。由本模块在启动时写进 `web/dist/`，
+# `web/index.html` 在业务脚本之前加载它。
+RUNTIME_CONFIG_FILENAME = "runtime-config.js"
 
 
 def _warn_default_admin_token() -> None:
@@ -53,6 +58,61 @@ def _warn_default_admin_token() -> None:
     )
 
 
+def _write_runtime_config() -> None:
+    """把后端**实际生效**的管理令牌写成前端可读的运行时配置。
+
+    ★ 为什么必须在运行时写，不能在构建期用 `VITE_ADMIN_TOKEN` 注入：
+      镜像由 GitHub Actions 构建、随公开仓库推到 GHCR，**任何人都拉得到**。
+      把令牌编进前端产物 = 把使用者的管理令牌公开发布 —— 这正是
+      `web/.env.development` 里把 `VITE_ADMIN_TOKEN` 留空的原因。
+
+      但容器里后端的令牌是**运行时**环境变量注入的（compose 里强制必填），
+      前端产物里没有 ⇒ 两者不一致 ⇒ 一键备份 / 凭证配置 / 适配器切换 /
+      越权处置这类管理端接口**全部 403**。使用者看到的是"按钮点了没反应"，
+      而日志里只有一条不起眼的 403 —— 属于「功能在、但根本用不了」的失效模式。
+
+      所以改为启动时写一份 `web/dist/runtime-config.js`，前端从
+      `window.__ERP_RUNTIME__.adminToken` 读取。令牌只存在于**容器的可写层**，
+      镜像层里没有；每次启动重写，改了 `ADMIN_TOKEN` 重启即生效。
+
+    ★ 取值必须与后端同源：这里读 `get_settings().admin_token` 而不是
+      `os.getenv("ADMIN_TOKEN")`，否则"未设置 ADMIN_TOKEN 时用默认值
+      `admin-token`"这一分支前后端会对不上（后端放行、前端拿着空串被 403）。
+
+    ★ 可见性边界要说清楚：能访问该页面的人就能读这个文件 —— 这与"令牌固化在
+      前端产物里"在**局域网范围内是等价的**。本改动真正消除的泄漏是
+      **镜像公开**这一条，不是"同网的人拿不到"。要防后者只能上真正的登录，
+      不在 MVP 范围，别拿这条假装解决了。
+    """
+    # 与 `app.main._resolve_web_dist()` 的"源码树约定"候选同源：
+    # 镜像里即 /app/web/dist，与挂载给 _SpaStaticFiles 的是同一个目录。
+    dist = BACKEND_DIR.parent / "web" / "dist"
+    if not (dist / "index.html").is_file():
+        print(
+            "[info] 未检测到前端构建产物，跳过 runtime-config 注入（纯 API 形态）",
+            file=sys.stderr,
+        )
+        return
+
+    from app.core.config import get_settings
+
+    token = get_settings().admin_token
+    payload = json.dumps({"adminToken": token}, ensure_ascii=False)
+    try:
+        (dist / RUNTIME_CONFIG_FILENAME).write_text(
+            f"window.__ERP_RUNTIME__ = {payload};\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(
+            f"[warn] 写入 {RUNTIME_CONFIG_FILENAME} 失败：{exc}"
+            "（管理端按钮将全部 403）",
+            file=sys.stderr,
+        )
+        return
+    print(f"[info] 已注入前端运行时配置：{dist / RUNTIME_CONFIG_FILENAME}", file=sys.stderr)
+
+
 def main() -> int:
     _warn_default_admin_token()
 
@@ -60,6 +120,8 @@ def main() -> int:
     from app.core.bootstrap import ensure_database_ready
 
     ensure_database_ready(BACKEND_DIR / "alembic.ini")
+
+    _write_runtime_config()
 
     import uvicorn
 

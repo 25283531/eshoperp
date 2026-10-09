@@ -46,6 +46,21 @@ export class ApiError extends Error {
 const DEFAULT_OPERATOR: string = import.meta.env.VITE_DEFAULT_OPERATOR ?? 'owner';
 
 /**
+ * 容器形态下的运行时配置。
+ * 由 `backend/container_entry.py` 在**容器启动时**写进 `web/dist/runtime-config.js`，
+ * 经 `web/index.html` 在业务脚本之前加载。源码开发态该文件不存在（404），取不到即为 undefined。
+ */
+interface ErpRuntimeConfig {
+  adminToken?: string;
+}
+
+declare global {
+  interface Window {
+    __ERP_RUNTIME__?: ErpRuntimeConfig;
+  }
+}
+
+/**
  * 管理员令牌：凭证 / 适配器配置 / 切换 / 系统设置 / 越权处置 / AI 并发 / 库存配置
  * 这些管理端接口后端要求 X-Operator-Token 头，缺失返回 403（code 1003）。
  *
@@ -57,9 +72,19 @@ const DEFAULT_OPERATOR: string = import.meta.env.VITE_DEFAULT_OPERATOR ?? 'owner
  *   现在未注入即为空：请求头带空值，后端如实返回 403。
  *   「没配就用不了」远好过「没配也能用，只是你以为别人用不了」。
  *
- *   取值来源：本机开发写在 `web/.env.local`（不入库），CI 由仓库 Secrets 注入。
+ * ★★ 取值顺序（容器化后新增第一条）★★
+ *   1. `window.__ERP_RUNTIME__.adminToken` —— 容器形态，启动时由后端写入，
+ *      与后端 `get_settings().admin_token` **同源**，改了 ADMIN_TOKEN 重启即生效。
+ *      为什么不走构建期 `VITE_ADMIN_TOKEN`：镜像随公开仓库推到 GHCR，
+ *      谁都能拉 —— 把令牌编进产物等于公开发布。
+ *   2. `import.meta.env.VITE_ADMIN_TOKEN` —— 源码开发态写 `web/.env.local`（不入库）。
+ *
+ *   用 `||` 而不是 `??`：容器里若未设 ADMIN_TOKEN，后端会用默认值 `admin-token`，
+ *   此时 runtime-config 写出来的也是 `admin-token`（非空）；`||` 额外兜住
+ *   "写成了空串"的异常情形，不至于让管理端全 403。
  */
-const ADMIN_TOKEN: string = import.meta.env.VITE_ADMIN_TOKEN ?? '';
+const ADMIN_TOKEN: string =
+  window.__ERP_RUNTIME__?.adminToken || import.meta.env.VITE_ADMIN_TOKEN || '';
 
 /**
  * 请求附加选项。

@@ -7,6 +7,16 @@
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      ★ 容器形态下的运行时配置，由 `backend/container_entry.py` 在**启动时**生成，
+        内容为 `window.__ERP_RUNTIME__ = {"adminToken": "..."}`。
+        令牌只落在容器的可写层，**不在镜像里**（镜像随公开仓库推到 GHCR，谁都能拉）。
+
+        必须在业务脚本之前同步加载，否则 client.ts 先执行就读不到。
+        源码开发态该文件不存在，浏览器拿到 404 即可 —— 前端会回退到
+        `web/.env.local` 里的 `VITE_ADMIN_TOKEN`，行为不变。
+    -->
+    <script src="/runtime-config.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

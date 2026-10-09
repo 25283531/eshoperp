@@ -6,7 +6,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 部署形态 | Windows / 单机优先，SQLite 零配置起步，`DATABASE_URL` 可切 PostgreSQL |
+| 部署形态 | **Docker 容器（linux/amd64）为唯一交付形态**，镜像由 GitHub Actions 构建并推到 GHCR；SQLite 零配置起步，`DATABASE_URL` 可切 PostgreSQL。源码态可在 Windows 直接跑（仅开发用） |
 | 后端 | FastAPI + SQLAlchemy 2.0 + Alembic + Pydantic v2 + APScheduler |
 | 前端 | React 18 + TypeScript + Vite + Ant Design 5 |
 | 设计文档 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
@@ -47,7 +47,9 @@ selfuse_ecommerce_erp/
 
 ---
 
-## 二、快速开始（Windows）
+## 二、快速开始
+
+> 第 1~5 步是**源码开发态**（开发机为 Windows）。**生产部署请直接跳到第 6 步 Docker 容器** —— 那是当前唯一交付形态，桌面 exe 已废弃。
 
 ### 1. 准备 Python 环境
 
@@ -118,6 +120,67 @@ cd web
 npm install
 npm run dev      # http://localhost:5173，已代理 /api → 127.0.0.1:8000
 ```
+
+### 6. 容器部署（Docker —— 生产 / 唯一交付形态）
+
+目标环境：OpenWrt 路由器上的 Docker，**X86 架构**，故镜像平台固定 `linux/amd64`。
+镜像由 GitHub Actions 构建并推送到 GHCR（`.github/workflows/docker-build.yml`），
+**不在本机构建**（本机 Docker daemon 未运行）。
+
+**① 准备文件**（放在同一个目录，如 `/mnt/sda1/erp/`）：取仓库根目录的
+`docker-compose.yml` 与 `.env.example`，然后：
+
+```bash
+cp .env.example .env
+# 编辑 .env：把 ADMIN_TOKEN 改成自己的随机串（★ 必填，不设置 compose 会拒绝启动）
+```
+
+**② 启动**：
+
+```bash
+docker compose up -d
+docker compose logs -f        # 首次启动会自动建库（alembic upgrade head）
+```
+
+**③ 访问**：浏览器打开 `http://<路由器IP>:8000`。若 8000 已被路由器上别的服务占用，
+只改端口映射的**左侧**（如 `"8080:8000"`），右侧容器内固定 8000 —— **容器不做端口顺延**。
+
+**④ 数据与备份**（使用者明确要求"放一个目录 + 一键备份"）：
+
+| 项 | 位置 |
+| --- | --- |
+| 宿主机数据目录（**唯一**需要备份 / 迁移的目录） | `./data/`（与 compose 文件同级） |
+| 容器内挂载点 | `/app/data` |
+| 内容 | `erp.db`（主库）+ 素材图片 / AI 产出 + `backups/`（一键备份产物） |
+
+两种备份方式，**推荐第一种**：
+
+1. **页面「数据备份」一键按钮**：`POST /api/v1/system/backup`，把整个 `data/` 打成
+   zip 落在 `data/backups/`，最多保留 20 份、超限自动删最旧。
+   ★ 它用 `sqlite3.Connection.backup()` 导出**自洽快照** —— 直接 `cp erp.db` 在 WAL
+   模式下可能漏掉尚未 checkpoint 的 `-wal` 文件，拿到的是不一致的库（见第 19 条）。
+2. **整个 `data/` 目录拷贝**：停容器后拷走；换机器时整个拷回，无需任何导入动作。
+
+> ⚠️ **只拷 `erp.db` 会静默丢素材与 AI 产出**：应用照常启动、只是素材全空，
+> 属于不易察觉的丢失。
+
+**⑤ 升级 / 迁移**：`docker compose pull && docker compose up -d`（`data/` 在宿主机，
+不受影响）。换机器：停容器 → 整个 `data/` 拷走 → 新机器同目录 → `docker compose up -d`。
+
+**⑥ 管理端令牌是怎么到前端的**（不直观，改部署前先看懂）：
+
+后端令牌是**运行时**环境变量 `ADMIN_TOKEN`；容器启动时 `backend/container_entry.py`
+把它写成 `web/dist/runtime-config.js`（`window.__ERP_RUNTIME__.adminToken`），前端从那里读。
+**令牌只落在容器可写层，不在镜像里**；改了 `ADMIN_TOKEN` 重启容器即生效，无需重新构建镜像。
+
+> ★ 为什么不能用构建期 `VITE_ADMIN_TOKEN`：镜像随**公开**仓库推到 GHCR，谁都能拉取 ——
+> 把令牌编进前端产物等于公开发布。这与 `web/.env.development` 里把该变量留空是同一条理由。
+>
+> ★ 别把这条理解成"局域网内的人拿不到令牌"：能访问页面的人就能读 `runtime-config.js`，
+> 这与"令牌固化在产物里"在局域网范围内等价。真正消除的是**镜像公开**这一条泄漏。
+
+**⑦ 与源码态的三处差异**（照抄源码态会踩）：监听 `0.0.0.0`（不是 `127.0.0.1`，否则
+端口映射过来也连不上）、**不做端口顺延**、**不开浏览器**。
 
 ---
 
@@ -433,4 +496,4 @@ curl -X PUT http://127.0.0.1:8000/api/v1/settings/ai.client \
 | 24 | **手工录入 / CSV 导入在首次 `inventory_sync` 之前没有 `inventory_snapshot` —— 只存在一个短窗口，期间不参与库存告警（下一迭代补）** | 补的第 15 条门槛解决的是"别误下架"，本条是它的**代价**，必须同时告知使用者。<br>**现状**：`SourceService.create_manual` / `import_csv` **本身不生成**库存快照；但 `InventoryService.sync()` 会遍历**全部**未删除 SKU（`inventory_service.py:82-85`）并逐 SKU 按来源**如实**标注写入（`:101-120`，手工 / CSV 商品 → `manual_import`）。因此**盲区只存在于"导入后、首次 sync 之前"这一个短窗口**：窗口内该类商品既不产生缺货告警也不会被自动下架；**一旦被 `sync()` 轮询到，它们就会产生库存告警，只是仍不参与自动下架** —— 第 15 条那道门槛拦的是**破坏性动作**，不是让告警消失。若以 `SCHEDULER_ENABLED=false` 运行且无人手工触发 `POST /inventory/sync`，这个窗口会一直存在。<br>**为什么本轮不补**：一旦补写快照，手工商品会立刻开始产生缺货告警，安全性将**完全依赖**第 15 条那道门槛。在门槛刚修好、同一文件已被并发覆盖两次的情况下，把"盲区"这层意外保护换成"只靠门槛"是不划算的取舍 —— **盲区的代价是"库存告警对主路径（手工录入）不可用"（可逆），补了之后门槛失效的代价是"在售商品被批量误下架"（不可逆）**。<br>**规避**：人工定期跑一次 `POST /api/v1/inventory/sync`，或确认 `inventory_sync` 周期任务已装配。<br>**下一迭代**：目的是**缩短首次同步前的窗口**（在导入 / 改库存时即补写 `source='manual_import'` 的快照并触发冲突重算，架构文档 §5.8 的 INV-P0-05 口径）—— **不是"让库存告警可用"**：轮询之后告警本来就已经可用，补它只是为了消灭窗口。<br>**2026-10-09 措辞修订（保号改字，编号 24 不变）**：原写法（"存在检测盲区" + "下一迭代补写快照"）会让读者以为"库存告警对手工商品整体不可用"，从而低估现有防护、或**立项去重做一个已经存在的功能**；已按 PRD §10.1 L1 核实后的事实修订。 |
 | 25 | **操作约定：同一时间只开一个 pytest 进程（并发跑会产生"假故障"）** | SQLite 是**单写者**，WAL 只解决"读不阻塞写"，**写仍然串行**（见第 19 条）。同时开多个 pytest 进程时，worker 线程会被饿到超过 stale 阈值，后果有三类，**每一类都长得像真 bug**：① 报 `sqlite3.OperationalError: database is locked` / `attempt to write a readonly database`；② 耗时从 **1m49s 膨胀到 5m40s**；③ 最坏的是**时序类用例被误判** —— 2026-10-09 实测：三个 pytest 进程并发时 `tests/test_task_runner_hygiene.py::test_deterministic_business_error_is_not_retried` 失败（`retry_count=1`，违反了"确定性错误不重试"），一度被当成语义回归；该归因**已排除，真实原因仍在取证**：`reclaim_stuck_tasks()` 曾被列为嫌疑，但三条证据否定它 —— ① `task_stuck_timeout_sec` 默认 **900s（15 分钟）**（`app/core/config.py:77`），而那次失败运行总耗时仅 **5m40s**，时间上不可能；② `start_watchdog()` 全项目**只有 `app/main.py:97` 一个调用点**（在 lifespan 内），pytest 走 ASGITransport **不触发 lifespan**（`conftest.py` 自身即如此），**看门狗线程在 pytest 进程里从未存在过**；③ pytest 中唯一调用 `reclaim_stuck_tasks()` 的是 `test_task_transaction_hygiene.py:286`，传的是只记录不执行的 `_StubRunner`，回收了也不会重跑，产生不了 `retry_count=1 + status=failed`。<br>当前候选（**未证实**）：第一次执行在准备阶段（`mark_running` / commit）抛了**可重试**的 `OperationalError` → 重试 → 第二次才跑到 handler 抛 `BusinessError` —— 这是唯一能同时解释 `status=failed` 且 `retry_count=1` 的序列。取证方法：查 `task_failed` 日志里 `will_retry=True` 的 `error_type`。<br>**被推翻的是根因解释，不是这条操作约定** —— "单独重跑 5 次全绿、独占跑全量 147/0"是实测事实，"并发跑 pytest 会产生假故障"的结论不受影响。<br>**元教训（与第 23 条同源）**：这里曾把"合理推断"当成"已查清的结论"写进文档。**文档里写"查清后是 X"之前，X 必须有硬证据，不能是看起来合理的推断** —— 否则下一个人会沿错误根因去改本来正确的代码。，**单独重跑 5 次全绿、独占跑全量 147/0**。<br>**约定**：① 跑全量套件时**一次只开一个进程**；② 看到失败**先单独重跑该用例再定性**，不要直接改代码；③ 确需并行（如 CI 分片）必须给每个进程配**独立的 `DATABASE_URL`**，绝不共用同一份 `data/erp.db`；④ 判定回归的标准是"独占跑也失败"，不是"某次跑失败"。<br>**为什么这条值得单列**：假故障比真 bug 更浪费时间——真 bug 查下去有结果，假故障查下去会改坏本来正确的代码。 |
 | 26 | **外部事实核实：三条硬边界（使用者实测核清，不是猜测）** | **① 个体户商品发布 API：分平台差异明显，不是稳过 —— 所以半自动是主路径，不是兜底**<br>抖店：个体户可申请 `/product/addV2`，应用描述写「自用，仅管理本人名下店铺，不对外提供 SaaS」通过率高，但 QPS 低于企业主体。<br>淘宝 TOP：个体户能申请 `taobao.item.add`，但近年审核收紧，大批量上新场景易被驳回；个人开发者几乎拿不到。<br>拼多多：可创建商家自研应用，但审核严格，会核验业务真实性。<br>→ 上架以**半自动为主路径**，API 全自动是**可选备选**，不要把业务押在"API 能过审"上。被驳回时的预案：ERP 生成图文 → 调用平台图片上传 → 半自动提交商品表单（可用 Playwright / WorkBuddy 完成网页填表上架）。<br><br>**② 妙手 / 逸淘没有 SKU 映射写入 API，只能 CSV 导入 —— 本项目已按此设计，无需改代码**<br>**妙手一键下单（履约模块）≠ 妙手 ERP**：妙手 ERP 有完整开放 API 支持写入 SKU 货源映射；但**一键下单模块官方无 REST API 用于新增 / 修改 SKU 映射**，只提供 CSV 批量导入 + 后台手动录入，客服口径「开放 API 只在妙手 ERP 版本」。<br>逸淘：国内一件代发一键下单**完全没有开放 API**，仅 CSV 导入 + 后台手动绑定（逸淘开放 API 只有跨境版本）。<br>→ 正确用法：`POST /api/v1/sku-mappings/export` 导出 CSV（已含妙手配对所需的货源侧字段 `source_product_1688_id` / `source_sku_code_1688` / `spec_signature` / `purchase_cost`），人工上传到妙手一键下单后台。**`POST /sku-mappings/push` 的推送能力在三个适配器均为 skeleton，它只导出 CSV 并把状态诚实标为 `degraded`，绝不伪装成 `success`** —— 这不是缺陷，是"第三方根本没有写入 API"的如实反映。<br>量大时的预案：写轻量脚本自动登录妙手后台上传 CSV（网页自动化）；工具切换预案：优先妙手，政策变动时逸淘可无缝替换（同样 CSV 导入 + 密文履约）。<br><br>**③ 1688 密文下单只能靠第三方 ISV 资质，自研只能明文**<br>买家收货地址解密是**店铺维度敏感权限**，需审批且有**每日解密额度**，自研调用会持续消耗额度；ISV 走密文履约链路**不解密、不消耗额度**。<br>`alibaba.trade.fenxiaoOrder.create`（密文回流下单核心接口）是**定向邀约、仅对大型服务商 ISV 开放**，要求月回流万单级别 → 个体户 / 普通商家自研**拿不到**。<br>普通商家能申请的是 `alibaba.trade.createCrossOrder`，**只能明文下单**，必须传买家真实姓名 + 手机号 + 地址。两个缺点：① 消耗店铺解密额度；② 供应商拿到买家真实信息，存在**溯源找到店铺发起盗图投诉**的风险。<br>→ 自研**不碰**订单解密与 1688 分销交易接口；密文回流履约能力由妙手 / 逸淘的 ISV 资质提供（这正是买履约模块而不自研的理由）。 |
-| 27 | **桌面 exe 会自建数据库，数据落在「exe 所在目录」下 —— 换机器/覆盖解压前请先备份** | 双击 exe 启动时，`desktop_entry` 会先跑一次 `alembic upgrade head` 再拉起服务，**首次启动无需手工建库**（源码态仍按第二节第 3 步手工迁移，入口不替你改库）。<br>**数据位置**：`<exe 所在目录>/data/erp.db`（即 `dist/erp/data/erp.db`，位于 `_internal` **之外**）。**升级时把旧目录里的 `data/` 整个拷到新目录**，不要直接覆盖解压后删掉旧文件夹。<br>**迁移基线**：若库里已有业务表却没有 `alembic_version` 记录（早期用 `create_all()` 建的库就是这种状态），入口会执行 `alembic stamp head` **打基线而不是重放历史** —— 因为重放会立刻撞 `table ... already exists`。此分支会打印醒目提示，不会静默改版本记录。<br>**修复背景（重要）**：`alembic/env.py` 原先把外部 connection 交给 `context.configure`，此时 alembic 的 `begin_transaction()` 是 **no-op**（`_in_external_transaction=True`，且 `SQLiteImpl.transactional_ddl=False`），**提交责任在调用方**；而旧代码用 `async with connectable.connect()`，退出是**关闭连接 → 未提交事务被 ROLLBACK**。DDL 在 SQLite 下自动提交因而"表建出来了"，但 `INSERT INTO alembic_version` 被回滚 ⇒ **库建好却查不到版本号 ⇒ 第二次启动重跑 0001 直接崩溃**（对 exe 使用者就是"能用一次，第二天打不开"）。现已改为 `async with connectable.begin()`，由 SQLAlchemy 负责提交。<br>**端口**：默认 8000，被占用时顺延（8001…）并在控制台提示；自动化场景请用 `ERP_PORT=8000` **固定**端口 —— 固定后端口被占会直接报错，避免校验脚本连到别的进程上却"通过"。 |
+| 27 | **容器形态下数据全部落在宿主机一个目录 `data/` —— 换机器 / 升级前先备份，且别只拷 `erp.db`** | 容器启动时 `container_entry` 会先跑一次 `alembic upgrade head` 再拉起服务，**首次启动无需手工建库**（源码态仍按第二节第 3 步手工迁移）。<br>**数据位置**：`<compose 文件所在目录>/data/`，整体挂进容器 `/app/data`（详见第二节第 6 步）。**升级 / 换机器时把 `data/` 整个目录拷走**，这是唯一需要迁移的东西。<br>**备份走页面「数据备份」一键按钮**（`POST /api/v1/system/backup`，产物落 `data/backups/`，保留最近 20 份）—— 它用 `sqlite3.Connection.backup()` 导出自洽快照；手工 `cp erp.db` 在 WAL 模式下可能漏掉未 checkpoint 的 `-wal`，拿到不一致的库。<br>**迁移基线**：若库里已有业务表却没有 `alembic_version` 记录（早期用 `create_all()` 建的库就是这种状态），入口会执行 `alembic stamp head` **打基线而不是重放历史** —— 因为重放会立刻撞 `table ... already exists`。此分支会打印醒目提示，不会静默改版本记录。<br>**修复背景（重要）**：`alembic/env.py` 原先把外部 connection 交给 `context.configure`，此时 alembic 的 `begin_transaction()` 是 **no-op**（`_in_external_transaction=True`，且 `SQLiteImpl.transactional_ddl=False`），**提交责任在调用方**；而旧代码用 `async with connectable.connect()`，退出是**关闭连接 → 未提交事务被 ROLLBACK**。DDL 在 SQLite 下自动提交因而"表建出来了"，但 `INSERT INTO alembic_version` 被回滚 ⇒ **库建好却查不到版本号 ⇒ 第二次启动重跑 0001 直接崩溃**（容器形态下就是"能用一次，重启容器就打不开"）。现已改为 `async with connectable.begin()`，由 SQLAlchemy 负责提交。<br>**端口**：容器内**固定 8000，不做顺延** —— 顺延会让"我连的是不是被测物"失去依据。宿主机端口冲突改 compose 端口映射的**左侧**（如 `8080:8000`）。<br>**令牌**：`ADMIN_TOKEN` 未设置时 compose **拒绝启动**（`${ADMIN_TOKEN:?...}` 语法），因为默认值 `admin-token` 是代码里写死的公开已知值；设置后由容器入口注入前端运行时配置（第二节第 6 步 ⑥），**不要用构建期 `VITE_ADMIN_TOKEN`** —— 镜像是公开的，编进产物等于公开发布令牌。<br>**exe 形态已废弃**：`desktop_entry.py` / PyInstaller spec / Windows 构建工作流已删除；本条按"保号改字"规则改写为容器口径，**编号 27 不变**。 |

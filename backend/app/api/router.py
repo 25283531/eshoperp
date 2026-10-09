@@ -16,6 +16,7 @@ from app.api.v1 import (
     ai_tasks,
     assets,
     audit,
+    backup,
     dashboard,
     inventory,
     listings,
@@ -47,5 +48,6 @@ for _module in (
     adapters,
     audit,
     tasks,
+    backup,
 ):
     api_router.include_router(_module.router)

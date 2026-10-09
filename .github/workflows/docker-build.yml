@@ -127,4 +127,28 @@ jobs:
           sys.exit(0 if n >= 20 else 1)
           " || { echo "::error::数据库表数量异常，自建库可能失败"; exit 1; }
 
+          # ⑤ 运行时令牌注入：前端必须拿到与后端**同源**的 ADMIN_TOKEN
+          #   这条一次守卫两类历史上真实发生过的缺陷：
+          #     a) 令牌在构建期注入 —— 镜像随公开仓库推到 GHCR，谁都能拉，
+          #        编进产物等于把使用者的管理令牌公开发布；
+          #     b) 管理端路由没注册 —— 前端按钮全 403，
+          #        而构建与启动**都不会报错**，只有点下去才发现用不了。
+          body=$(curl -s "http://127.0.0.1:${HOST_PORT}/runtime-config.js")
+          echo "runtime-config.js -> ${body}"
+          echo "$body" | grep -q "smoke-test-token" || {
+            echo "::error::runtime-config.js 未注入 ADMIN_TOKEN，前端管理端按钮将全部 403"
+            exit 1
+          }
+
+          # ⑥ 管理端端点存在、且用上面那个令牌能放行
+          #   （同时覆盖"路由没注册"与"前后端令牌对不上"两种失效）
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            "http://127.0.0.1:${HOST_PORT}/api/v1/system/backup" \
+            -H "X-Operator-Token: smoke-test-token" -H "X-Operator: owner")
+          echo "POST /api/v1/system/backup -> ${code}"
+          [ "$code" = "200" ] || {
+            echo "::error::备份端点期望 200，实际 ${code}（路由未注册 / 前后端令牌不一致）"
+            exit 1
+          }
+
           echo "::notice::冒烟验证全部通过"

@@ -230,7 +230,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 挂载业务路由（T-A07 交付；未实现时降级为占位，保证应用可启动）
     _mount_api_router(app, settings)
 
-    # ★ 挂载前端静态资源（桌面 exe / 单机部署形态）
+    # ★ 挂载前端静态资源（容器 / 单机部署形态；桌面 exe 已废弃）
     #   必须在 _mount_api_router **之后**：挂载到 "/" 会兜住所有未被上面命中路径，
     #   顺序反了会把 /api/v1/* 一起吞掉。
     _mount_frontend(app)
@@ -269,6 +269,10 @@ def _resolve_web_dist() -> Path | None:
     ★ 为什么打包形态必须靠 `sys._MEIPASS`：PyInstaller 会把数据文件解包到临时目录，
       源码树约定路径（`backend/app/main.py` 上溯两级）在打包环境下**根本不存在**，
       只按约定找的结果是 exe 起来后浏览器打开一片空白，且日志里没有任何线索。
+
+    ⚠️ 桌面 exe 形态**已废弃**（当前唯一交付形态是 Docker 容器，见 README 第二节第 6 步），
+      上面这条 `sys._MEIPASS` 分支今后不会再被走到，保留只是不主动破坏历史环境。
+      容器形态走的是"源码树约定"这一条：镜像里 `/app/backend/app/main.py` → `/app/web/dist`。
     """
     candidates: list[Path] = []
 
@@ -333,7 +337,7 @@ class _SpaStaticFiles(StaticFiles):
 
 
 def _mount_frontend(app: FastAPI) -> None:
-    """挂载前端 SPA 静态资源（桌面 exe / 单机部署形态）。
+    """挂载前端 SPA 静态资源（容器 / 单机部署形态；桌面 exe 已废弃）。
 
     ★ fail-safe 是硬要求：**dist 不存在时必须静默跳过，绝不抛异常**。
       开发态通常没构建前端，这里一旦抛错，`import app.main` 与整个 pytest 套件会全线崩溃 ——
