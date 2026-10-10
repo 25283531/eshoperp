@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -58,6 +59,68 @@ def derive_source_platform(product_1688_id: str | None, params_json: Mapping[str
     if declared:
         return declared
     return SOURCE_PLATFORM_MANUAL if str(product_1688_id or "").startswith(MANUAL_ID_PREFIX) else SOURCE_PLATFORM_1688
+
+
+# ---------------------------------------------------------------------------
+#  1688 商品链接解析
+# ---------------------------------------------------------------------------
+# ★ 为什么必须解析整条链接：前端「1688 采集」的 placeholder 就是
+#   `https://detail.1688.com/offer/123456.html`，使用者复制的一定是整条 URL；
+#   早年后端把这个字符串整体当作 productID 打给开放平台 ⇒ 恒失败。
+# ★ 覆盖的形态（正则从左到右逐步放宽）：
+#       https://detail.1688.com/offer/694567890123.html
+#       https://detail.1688.com/offer/694567890123.htm?spm=a260k.1.bxxx
+#       http://m.1688.com/offer/694567890123.html#anchor
+#       detail.1688.com/offer/694567890123.html      （没复制 scheme）
+#       https://detail.1688.com/offer/694567890123   （没 .html）
+#       https://detail.1688.com/?offerId=694567890123 （活动页带查询参数）
+#       694567890123                                  （纯数字 Offer ID）
+_OFFER_URL_RE = re.compile(
+    r"(?:https?://)?(?:[a-z0-9-]+\.)*1688\.com/offer/(\d{4,32})(?:[^\d]|$)",
+    re.IGNORECASE,
+)
+_OFFER_QUERY_RE = re.compile(r"[?&](?:offerI[dD]|productI[dD])=(\d{4,32})")
+_PURE_ID_RE = re.compile(r"^\d{4,32}$")
+
+PARSE_1688_ERROR = (
+    "无法从链接中识别商品 ID，请检查是否复制完整"
+    "（支持 https://detail.1688.com/offer/123456.html 或纯数字 Offer ID）"
+)
+
+
+def parse_1688_product_id(identifier: str) -> tuple[str, str]:
+    """从「1688 商品链接 / 纯数字 ID」中提取 Offer ID。
+
+    Args:
+        identifier: 使用者粘贴的原始输入（可以是整条 URL）。
+
+    Returns:
+        `(offer_id, reason)`：成功时 reason 为空串，失败时 offer_id 为空串、
+        reason 是**人话**错误提示（直接回给使用者即可）。
+    """
+    # ★ 从网页复制的链接常带不换行空格（U+00A0），strip() 吃不掉它
+    text = str(identifier or "").replace("\u00a0", " ").strip()
+    if not text:
+        return "", "1688 商品链接或商品 ID 不能为空"
+
+    # 去掉 URL 里的跟踪参数与锚点，避免 (.html?spm=...) 影响尾部匹配
+    text = text.split("#", 1)[0].strip()
+
+    match = _OFFER_URL_RE.search(text)
+    if match:
+        return match.group(1), ""
+
+    match = _OFFER_QUERY_RE.search(text)
+    if match:
+        return match.group(1), ""
+
+    if _PURE_ID_RE.match(text):
+        return text, ""
+
+    # 带 .html 但域名不是 1688 → 明确报错比静默当 ID 更有用
+    if text.lower().startswith(("http://", "https://")):
+        return "", PARSE_1688_ERROR + f"（看起来不是 1688 商品链接：{text[:80]}）"
+    return "", PARSE_1688_ERROR + f"（收到：{text[:80]}）"
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +366,7 @@ __all__ = [
     "minutes_ago",
     "mock_item_id",
     "mock_sku_code",
+    "parse_1688_product_id",
     "parse_iso",
     "safe_filename",
     "signature_matches",

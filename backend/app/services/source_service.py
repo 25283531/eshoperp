@@ -19,13 +19,23 @@ from typing import Any, Iterable
 
 from sqlalchemy import func, or_, select
 
-from app.adapters.source.alibaba1688 import Alibaba1688Adapter
+from app.adapters.source.alibaba1688 import CREDENTIAL_OWNER_KEY, Alibaba1688Adapter
 from app.core.config import get_settings
 from app.core.errors import BusinessError, ErrorCode, NotFoundError
 from app.core.logging import get_logger, get_trace_id
+from app.core.security import decrypt_credential
 from app.models.asset import Asset
-from app.models.enums import AssetOrigin, AssetType, AuditActionType, AuditObjectType, SourceStatus
+from app.models.enums import (
+    AssetOrigin,
+    AssetType,
+    AuditActionType,
+    AuditObjectType,
+    CredentialOwnerType,
+    CredentialStatus,
+    SourceStatus,
+)
 from app.models.source import SourceProduct, SourceSku, Supplier
+from app.models.system import Credential
 from app.schemas.common import parse_money
 from app.schemas.source import SourceCsvImportResult, SourceImportFailure, SourceProductManualCreate
 from app.services.audit_service import AuditService
@@ -36,6 +46,7 @@ from app.utils.kit import (
     content_hash_bytes,
     iso_utc,
     manual_source_id,
+    parse_1688_product_id,
     spec_signature,
     utc_now,
 )
@@ -45,12 +56,26 @@ logger = get_logger(__name__)
 __all__ = [
     "MAX_COLLECT_IDENTIFIERS",
     "MAX_IMPORT_ROWS",
+    "SOURCE_1688_OWNER_KEY",
     "SOURCE_PLATFORM_MANUAL",
     "SourceService",
+    "load_source_credentials",
 ]
 
 # 单次采集上限（§5.5.3：≤50）
 MAX_COLLECT_IDENTIFIERS = 50
+
+# ---------------------------------------------------------------------------
+#  1688 采集：凭证定位键 + 素材下载上限
+# ---------------------------------------------------------------------------
+# ★ 1688 采集凭证在 `credential` 表里的坐标（与适配器同源的单一事实来源）。
+#   **凭证一律不硬编码**，必须从这里读。
+SOURCE_1688_OWNER_KEY = CREDENTIAL_OWNER_KEY
+SOURCE_1688_CREDENTIAL_KEYS: tuple[str, ...] = ("app_key", "app_secret", "access_token")
+# ★ bootstrap.py 给占位行填的就是这个值，读到它等价于「用户还没配」
+PLACEHOLDER_CREDENTIAL = "__NOT_CONFIGURED__"
+# 单个商品最多下载几张素材（主图 1 + 详情图 8），防止超大详情把采集拖死
+MAX_DOWNLOAD_IMAGES = 9
 
 # ---------------------------------------------------------------------------
 #  手工录入 / CSV 导入的常量
@@ -142,6 +167,55 @@ class _ManualProductSpec:
     remark: str = ""
     rows: list[int] = field(default_factory=list)
     skus: list[_ManualSkuSpec] = field(default_factory=list)
+
+
+async def load_source_credentials(session: Any) -> dict[str, str]:
+    """★ 从 `credential` 表读取并解密 1688 采集凭证（★ 绝不允许硬编码）。
+
+    坐标：`owner_type=source`、`owner_key=alibaba1688`，
+    `credential_key` ∈ {app_key, app_secret, access_token}（与 bootstrap 占位行同源）。
+
+    Returns:
+        `{credential_key: 明文}`；未配置 / 是占位值 / 解密失败 的键**不出现在结果里**，
+        调用方据此判断缺了哪一项。
+    """
+    rows = (
+        await session.execute(
+            select(Credential).where(
+                Credential.owner_type == CredentialOwnerType.SOURCE.value,
+                Credential.owner_key == SOURCE_1688_OWNER_KEY,
+                Credential.status == CredentialStatus.ACTIVE.value,
+            )
+        )
+    ).scalars().all()
+
+    values: dict[str, str] = {}
+    for row in rows:
+        key = str(row.credential_key or "").strip().lower()
+        if key not in SOURCE_1688_CREDENTIAL_KEYS or key in values:
+            continue
+        try:
+            plain = decrypt_credential(row.value_enc).strip()
+        except Exception as exc:  # noqa: BLE001  单条解密失败不得带崩整次采集
+            logger.warning("source_credential_decrypt_failed", credential_key=key, error=str(exc))
+            continue
+        if not plain or plain == PLACEHOLDER_CREDENTIAL:
+            continue
+        values[key] = plain
+    return values
+
+
+def missing_credential_message(missing_keys: Iterable[str]) -> str:
+    """未配置凭证时的**可操作**错误提示（使用者照着做就能配好）。"""
+    names = [str(key) for key in missing_keys if str(key)]
+    return (
+        f"未配置 1688 采集凭证（缺少 {'、'.join(names) or '未知项'}）："
+        "请在「系统设置 → 凭证」中新增三行凭证——"
+        f"owner_type=source、owner_key={SOURCE_1688_OWNER_KEY}，"
+        "credential_key 分别为 app_key / app_secret / access_token；"
+        "AppKey 与 AppSecret 在 https://open.1688.com 的应用详情页领取，"
+        "access_token 由该应用走 OAuth 授权后换取。"
+    )
 
 
 class SourceService:
@@ -403,7 +477,26 @@ class SourceService:
 
         # ★ 1688 适配器**不接受 session 参数**（它是只读采集适配器，自己不碰库）；
         #   早期写成 `Alibaba1688Adapter(session=session)` → TypeError，采集 100% 失败。
-        adapter = Alibaba1688Adapter()
+        # ★ 凭证从 `credential` 表读（owner_type=source / owner_key=alibaba1688），
+        #   早年这里写成 `Alibaba1688Adapter()` 不传凭证 ⇒ configured 恒 False ⇒
+        #   collect() 恒返回「未配置 AppKey / AccessToken」，整条采集链路是死的。
+        credentials = await load_source_credentials(session)
+        missing = [key for key in SOURCE_1688_CREDENTIAL_KEYS if not credentials.get(key)]
+        if missing:
+            reason = missing_credential_message(missing)
+            logger.warning("source_collect_no_credentials", missing=missing)
+            return {
+                "accepted": len(items),
+                "created": 0,
+                "updated": 0,
+                "failed": [{"identifier": item, "reason": reason} for item in items],
+                "product_ids": [],
+            }
+        adapter = Alibaba1688Adapter(
+            app_key=str(credentials.get("app_key") or ""),
+            app_secret=str(credentials.get("app_secret") or ""),
+            access_token=str(credentials.get("access_token") or ""),
+        )
 
         created = 0
         updated = 0
@@ -411,10 +504,17 @@ class SourceService:
         product_ids: list[int] = []
 
         for identifier in items:
+            # ★ 使用者粘贴的是**整条商品链接**（前端 placeholder 就是
+            #   https://detail.1688.com/offer/123456.html），必须先解析出 Offer ID，
+            #   否则会把整串 URL 当 productID 打给开放平台 ⇒ 必然失败。
+            offer_id, parse_error = parse_1688_product_id(identifier)
+            if not offer_id:
+                failed.append({"identifier": identifier, "reason": parse_error})
+                continue
             try:
                 # ★ `collect()` 返回的是三元组 `(ok, CollectedProduct|None, message)`，
                 #   不是 dict —— 早期按 dict 取字段会 AttributeError。
-                ok, collected, message = await adapter.collect(identifier)
+                ok, collected, message = await adapter.collect(offer_id)
             except Exception as exc:  # noqa: BLE001  适配器已防御；此处再兜一层
                 logger.warning("source_collect_failed", identifier=identifier, error=str(exc))
                 failed.append({"identifier": identifier, "reason": str(exc)})
@@ -423,7 +523,7 @@ class SourceService:
                 failed.append({"identifier": identifier, "reason": message or "1688 未返回商品数据"})
                 continue
 
-            product_1688_id = str(collected.product_1688_id or identifier)
+            product_1688_id = str(collected.product_1688_id or offer_id)
             stmt = select(SourceProduct).where(SourceProduct.product_1688_id == product_1688_id)
             product = (await session.execute(stmt)).scalars().first()
             if product is None:
@@ -440,6 +540,9 @@ class SourceService:
             product.origin_url = collected.origin_url or product.origin_url
             product.main_image_url = collected.main_image_url or product.main_image_url
             product.params_json = dict(collected.params_json or {}) or product.params_json
+            # ★ `raw_payload_json` 存**完整原始响应**：受「不改表结构、不加列」约束，
+            #   详情图 URL 列表不新开字段，全部随原始 payload 保留在这里可追溯
+            #   （详情图字段名 PROBE-PENDING，原始响应是事后确认字段名的唯一依据）。
             product.raw_payload_json = dict(collected.raw or {})
             product.status = str(product.status or "on_sale")
             product.collected_at = utc_now()
@@ -447,9 +550,22 @@ class SourceService:
             product_ids.append(int(product.id))
 
             # ---------- 落 SKU ----------
+            # ★ 会话 `autoflush=False`，本次循环里刚 add 的 SKU 不会被后续 SELECT 看到。
+            #   1688 响应里常出现「多个 SKU 都没有 skuCode 且规格为空」的情况，
+            #   兜底编码会退化成同一个 `{商品ID}-DEFAULT`；不去重就撞
+            #   `uq_source_sku_product_code` ⇒ IntegrityError 把整个采集任务打挂。
+            seen_sku_codes: set[str] = set()
             for sku_collected in list(collected.skus or []):
                 sku_code = str(sku_collected.sku_code_1688 or "").strip()
                 if not sku_code:
+                    continue
+                if sku_code in seen_sku_codes:
+                    logger.warning(
+                        "source_sku_duplicate_skipped",
+                        product_1688_id=product_1688_id,
+                        sku_code=sku_code,
+                        reason="同一响应内 SKU 编码重复（1688 未返回 skuCode 且规格为空）",
+                    )
                     continue
                 sku_stmt = select(SourceSku).where(
                     SourceSku.source_product_id == product.id, SourceSku.sku_code_1688 == sku_code
@@ -458,6 +574,7 @@ class SourceService:
                 if sku is None:
                     sku = SourceSku(source_product_id=product.id, sku_code_1688=sku_code)
                     session.add(sku)
+                seen_sku_codes.add(sku_code)
                 sku.spec_json = dict(sku_collected.spec_json or {})
                 sku.spec_signature = str(sku_collected.spec_signature or "")
                 sku.cost_price_cents = int(sku_collected.cost_price_cents or 0) or None
@@ -468,12 +585,14 @@ class SourceService:
 
             # ---------- 落原始素材（可选下载图片）----------
             if download_images:
-                image_urls: list[str] = []
+                # ★ 主图 1 张 + 详情图若干，各自带 asset_type，避免全部打成 DETAIL_IMAGE
+                pending: list[tuple[str, str]] = []
                 if collected.main_image_url:
-                    image_urls.append(collected.main_image_url)
-                await SourceService._download_assets(
-                    session, adapter=adapter, product=product, urls=image_urls
-                )
+                    pending.append((collected.main_image_url, AssetType.MAIN_IMAGE.value))
+                for detail_url in list(collected.detail_image_urls or []):
+                    if detail_url and detail_url != collected.main_image_url:
+                        pending.append((detail_url, AssetType.DETAIL_IMAGE.value))
+                await SourceService._download_assets(session, adapter=adapter, product=product, items=pending)
 
         await AuditService.write(
             session,
@@ -501,39 +620,58 @@ class SourceService:
         *,
         adapter: Alibaba1688Adapter,
         product: SourceProduct,
-        urls: Iterable[str],
+        items: Iterable[tuple[str, str]],
     ) -> int:
-        """下载原始图片并落 `asset`（去重：按 `content_hash` 唯一索引）。"""
+        """下载原始图片并落 `asset`（去重：按 `content_hash` 唯一索引）。
+
+        Args:
+            items: `[(图片 URL, AssetType 值)]`，按传入顺序编号（第 0 张即主图）。
+
+        ★ `download_image()` 现在返回 `(ok, bytes, message)`：**只负责取字节**，
+          写盘与算 hash 都在本方法里做，杜绝「适配器写一遍、调用方把三元组当字节再写一遍」
+          的历史 bug（`content_hash_bytes(tuple)` → TypeError）。
+        """
         saved = 0
         assets_dir = get_settings().assets_dir / "raw" / str(product.product_1688_id)
         assets_dir.mkdir(parents=True, exist_ok=True)
+        # ★ 会话是 `autoflush=False`（见 core/database.py），**本次循环里刚 add 的行不会被 SELECT 看到**。
+        #   同一个商品的详情图里出现完全相同的字节是很常见的（商家重复贴图），
+        #   只看数据库会让第二次 INSERT 直接撞 `uq_asset_content_hash` ⇒ IntegrityError，
+        #   把整个采集任务打挂。因此必须再在本次批处理内去重。
+        batch_hashes: set[str] = set()
 
-        for index, url in enumerate(list(urls)[:9]):  # 最多 9 张，避免采集过慢
+        for index, (url, asset_type) in enumerate(list(items)[:MAX_DOWNLOAD_IMAGES]):
             url_str = str(url or "").strip()
-            if not url_str.startswith("http"):
+            if not url_str.startswith(("http://", "https://")):
                 continue
             try:
-                data = await adapter.download_image(url_str)
+                ok, data, message = await adapter.download_image(url_str)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("source_image_download_failed", url=url_str, error=str(exc))
                 continue
-            if not data:
+            if not ok or not data:
+                # ★ `data` 是 bytes：空字节串是假值、非空字节串是真值，这个判断有效。
+                #   早年 `data` 是三元组 `(bool, str, str)` 时**恒为真** ⇒ 判断形同虚设。
+                logger.warning("source_image_download_failed", url=url_str, error=message or "空内容")
                 continue
 
             digest = content_hash_bytes(data)
-            exists = (
-                await session.execute(select(Asset.id).where(Asset.content_hash == digest))
-            ).scalar_one_or_none()
+            if digest in batch_hashes:
+                logger.info("source_image_duplicate_skipped", url=url_str, reason="本次采集已落过相同内容")
+                continue
+            exists = (await session.execute(select(Asset.id).where(Asset.content_hash == digest))).scalar_one_or_none()
             if exists is not None:
                 continue
+            batch_hashes.add(digest)
 
-            filename = f"{'main' if index == 0 else 'detail'}_{index:02d}.jpg"
+            is_main = asset_type == AssetType.MAIN_IMAGE.value
+            filename = f"{'main' if is_main else 'detail'}_{index:02d}.jpg"
             target = assets_dir / filename
             target.write_bytes(data)
             session.add(
                 Asset(
                     source_product_id=product.id,
-                    asset_type=AssetType.MAIN_IMAGE.value if index == 0 else AssetType.DETAIL_IMAGE.value,
+                    asset_type=asset_type,
                     origin=AssetOrigin.RAW.value,
                     storage_path=str(target),
                     origin_url=url_str,
