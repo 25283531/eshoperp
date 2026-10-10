@@ -6,7 +6,9 @@ import {
   Col,
   Divider,
   Form,
+  Input,
   InputNumber,
+  Modal,
   Progress,
   Row,
   Select,
@@ -15,6 +17,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -31,6 +34,7 @@ import {
   syncInventory,
   updateInventoryConfig,
 } from '@/api/ops';
+import { batchOfflineListingProducts } from '@/api/publish';
 import type {
   AutoOfflineRecordVo,
   InventoryAlertVo,
@@ -55,6 +59,16 @@ interface ConfigFormValues {
   price_increase_threshold: string;
   out_of_stock_action: string;
   price_increase_action: string;
+}
+
+/** 一键下架的目标：一条告警关联的可下架平台商品 ID + 用于展示的货源 SKU 名 */
+interface OfflineTarget {
+  ids: number[];
+  skuName: string;
+}
+
+interface OfflineFormValues {
+  reason: string;
 }
 
 const DEFAULT_FILTERS: InventoryFilterValues = {
@@ -153,6 +167,8 @@ export default function Inventory(): JSX.Element {
   const actionOptions = useEnumOptions('InventoryAction');
   const [activeTab, setActiveTab] = useState<string>('alerts');
   const [configForm] = Form.useForm<ConfigFormValues>();
+  const [offlineTarget, setOfflineTarget] = useState<OfflineTarget | null>(null);
+  const [offlineForm] = Form.useForm<OfflineFormValues>();
 
   const configQuery = useQuery({
     queryKey: ['inventory', 'config'],
@@ -213,6 +229,54 @@ export default function Inventory(): JSX.Element {
     onSuccess: () => {
       message.success('阈值配置已保存');
       void queryClient.invalidateQueries({ queryKey: ['inventory', 'config'] });
+    },
+  });
+
+  /**
+   * 一键下架（人工确认下架，**不是自动下架**）。
+   *
+   * ★ 与自动下架的边界：这里的触发者是人，且必须经过弹窗填原因二次确认，
+   *   不改变 §4.8 / 第 15 条的任何自动判定逻辑（自动下架仍只对最近快照来源为
+   *   erp_poll / third_party_push 的 SKU 生效）。
+   *
+   * ★ 结果必须如实反馈：batch-offline 的 failed[] 里混了「本来就处于下架状态」
+   *   和「平台接口真失败」两种完全不同的情况，不能吞掉，要逐条把 reason 显示出来。
+   */
+  const batchOfflineMutation = useMutation({
+    mutationFn: (body: { ids: number[]; reason: string }) =>
+      batchOfflineListingProducts(body.ids, body.reason),
+    onSuccess: (data) => {
+      const okCount = data.success?.length ?? 0;
+      const failed = data.failed ?? [];
+      if (failed.length === 0) {
+        message.success(`一键下架完成：成功 ${okCount} 个，失败 0 个`);
+      } else {
+        Modal.warning({
+          title: `一键下架完成：成功 ${okCount} 个，失败 ${failed.length} 个`,
+          width: 560,
+          okText: '我知道了',
+          content: (
+            <div>
+              <Typography.Paragraph style={{ marginBottom: 8 }}>
+                失败明细如下。「本来就处于下架状态」与「平台接口调用失败」都会出现在
+                failed 里，两者处置方式不同，请逐条确认：
+              </Typography.Paragraph>
+              <ul style={{ paddingLeft: 20, marginBottom: 0 }}>
+                {failed.map((item) => (
+                  <li key={item.id}>
+                    <span className="erp-mono">#{item.id}</span>：{item.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ),
+        });
+      }
+      setOfflineTarget(null);
+      offlineForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: ['inventory'] });
+      // 平台商品状态被改写了，P10 列表缓存同步失效（不改动 P10 页面本身）
+      void queryClient.invalidateQueries({ queryKey: ['listing-products'] });
     },
   });
 
@@ -279,6 +343,43 @@ export default function Inventory(): JSX.Element {
           ),
       },
       { title: '检测时间', dataIndex: 'detected_at', width: 170, render: (v: string) => formatTime(v) },
+      {
+        // ★ 人工一键下架入口：告警页此前只有「建议下架」标签，没有任何可点击动作，
+        //   运营得自己跑到 P10 才能下架。这里补的是**人工确认下架**，不是自动下架。
+        title: '操作',
+        key: 'action',
+        width: 110,
+        fixed: 'right',
+        render: (_value: unknown, record) => {
+          // 后端字段可能尚未落盘（契约由后端并行开发），用 ?? [] 兜底，不用 ! 断言
+          const ids = record.listing_product_ids ?? [];
+          const disabled = ids.length === 0;
+          const button = (
+            <Button
+              type="link"
+              danger
+              size="small"
+              disabled={disabled}
+              onClick={() =>
+                setOfflineTarget({
+                  ids,
+                  skuName: record.source_sku_name ?? record.source_product_title ?? `#${record.id}`,
+                })
+              }
+            >
+              {/* ★ 文案硬要求：必须是「一键下架」，光秃秃的"下架"会被误读成"已下架" */}
+              一键下架
+            </Button>
+          );
+          if (!disabled) return button;
+          return (
+            <Tooltip title="该货源 SKU 当前没有可下架的平台商品（尚未上架或已全部下架）">
+              {/* 包一层 span：disabled 的 button 不触发鼠标事件，否则 Tooltip 不显示 */}
+              <span>{button}</span>
+            </Tooltip>
+          );
+        },
+      },
     ],
     [],
   );
@@ -433,7 +534,7 @@ export default function Inventory(): JSX.Element {
               <Table<InventoryAlertVo>
                 rowKey="id"
                 size="small"
-                scroll={{ x: 1500 }}
+                scroll={{ x: 1620 }}
                 columns={alertColumns}
                 dataSource={alertsQuery.data?.items ?? []}
                 pagination={{ ...tablePagination, total: alertsQuery.data?.total ?? 0 }}
@@ -555,6 +656,57 @@ export default function Inventory(): JSX.Element {
           },
         ]}
       />
+
+      {/* 一键下架（人工确认）：复用 P10 的下架弹窗模式，必须填原因 + 显式告知数量 */}
+      <Modal
+        title="一键下架"
+        open={offlineTarget !== null}
+        onCancel={() => {
+          setOfflineTarget(null);
+          offlineForm.resetFields();
+        }}
+        onOk={() => offlineForm.submit()}
+        confirmLoading={batchOfflineMutation.isPending}
+        okText={
+          offlineTarget ? `确认下架（${offlineTarget.ids.length} 个商品）` : '确认下架'
+        }
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={
+            offlineTarget
+              ? `将对 ${offlineTarget.ids.length} 个平台商品执行下架（货源 SKU：${offlineTarget.skuName}）`
+              : '将对关联的平台商品执行下架'
+          }
+          description="会真实调用自研 ListingAdapter 的平台下架接口、改写店铺商品状态，并落审计（action_type=offline）。本次是人工确认下架，不走自动下架判定。"
+        />
+        {offlineTarget && offlineTarget.ids.length > 0 ? (
+          <Typography.Paragraph type="secondary">
+            {offlineTarget.ids.length > 1
+              ? '该货源 SKU 关联了多个平台商品（跨平台铺货是正常业务），本次会一并下架全部 '
+              : '本次将下架 '}
+            {offlineTarget.ids.length} 个：
+            {offlineTarget.ids.map((id) => `#${id}`).join('、')}
+          </Typography.Paragraph>
+        ) : null}
+        <Form
+          form={offlineForm}
+          layout="vertical"
+          onFinish={(values: OfflineFormValues) => {
+            if (!offlineTarget) return;
+            batchOfflineMutation.mutate({ ids: offlineTarget.ids, reason: values.reason });
+          }}
+        >
+          <Form.Item name="reason" label="下架原因" rules={[{ required: true }]}>
+            <Input.TextArea rows={3} placeholder="如：货源缺货 / 成本涨幅超阈值 / 人工确认下架" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </PageContainer>
   );
 }

@@ -991,6 +991,12 @@ export interface InventoryAlertVo {
   data_source: string;
   /** ★ F11 可否自动下架。false ⇒ 只告警，不自动执行，需人工一键下架。 */
   auto_offline_allowed: boolean;
+  /**
+   * 与该告警 source_sku_id 关联、且**当前不是已下架状态**的平台商品 ID 列表。
+   * 已排除已下架商品；**可能为空**（没有关联平台商品，或关联商品都已下架）。
+   * 后端未落盘时该字段不返回，前端一律用 `?? []` 兜底，禁止 `!` 断言。
+   */
+  listing_product_ids: number[];
 }
 
 export interface AutoOfflineRecordVo {
