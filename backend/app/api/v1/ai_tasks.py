@@ -17,7 +17,8 @@ from app.api.v1._common import enqueue_task, page_of
 from app.core.deps import AdminOperator, CurrentOperator, DbSession
 from app.core.pagination import PageParams, page_params
 from app.core.response import ApiResponse
-from app.models.enums import TaskType
+from app.adapters.ai.base import AiImagePrompt, AiInputPrompt
+from app.models.enums import AiTaskType, TaskType
 from app.schemas.asset import (
     AiConcurrencyUpdate,
     AiTaskCreate,
@@ -25,6 +26,7 @@ from app.schemas.asset import (
     AiTaskResultVo,
     AiTaskReviewRequest,
     AiTaskVo,
+    AiTitleSelectRequest,
 )
 from app.services.ai_task_service import AiTaskService
 
@@ -33,19 +35,44 @@ router = APIRouter(tags=["AI 重构"])
 __all__ = ["router"]
 
 
-@router.post("/ai-tasks", status_code=202, summary="批量创建 AI 重构任务")
+@router.post("/ai-tasks", status_code=202, summary="批量创建 AI 任务（可指定能力类型与提示词）")
 async def create_ai_tasks(
     payload: AiTaskCreate,
     session: DbSession,
     operator: CurrentOperator,
 ) -> ApiResponse[dict[str, Any]]:
-    """创建任务并逐个提交异步执行（`ai_rework`）。"""
+    """创建任务并逐个提交异步执行。
+
+    ★ `task_type` 决定跑哪种能力（`ai_rework` / `image_redraw` / `title_suggest` / `video_script`），
+      默认 `ai_rework`（老调用方不带该字段时行为不变）。
+    ★ 队列 `TaskType` 仍然**只用 `ai_rework` 一种**（见 `AiTaskService.AI_TASK_TYPE_DISPATCH` 的注释）：
+      异步任务类型回答"由哪个 handler 执行"，AI 能力种类只记在 `ai_task.task_type` 上，
+      不复制第二份真相源。
+    """
+    # ★ 逐图提示词：入参 schema → 数据契约 `AiImagePrompt`（键名以 `AiInputPrompt` 为准）
+    image_prompts = [
+        AiImagePrompt(
+            index=int(item.index),
+            prompt=item.prompt,
+            asset_id=item.asset_id,
+            source_path=item.source_path,
+            tag=item.tag,
+        )
+        for item in (payload.image_prompts or [])
+    ]
     tasks = await AiTaskService.create_tasks(
         session,
         source_product_ids=[int(i) for i in payload.source_product_ids],
         target_platform=payload.target_platform,
         rework_items=list(payload.rework_items or []) or None,
         template_version=payload.template_version,
+        task_type=payload.task_type,
+        input_prompt=AiInputPrompt(
+            global_prompt=payload.global_prompt or "",
+            images=image_prompts,
+            title_prompt=payload.title_prompt or "",
+            video_script_prompt=payload.video_script_prompt or "",
+        ),
         operator=operator.name,
     )
     await session.commit()
@@ -61,9 +88,10 @@ async def create_ai_tasks(
         if record_id is not None:
             task_record_ids.append(record_id)
 
+    resolved_type = payload.task_type or AiTaskType.AI_REWORK.value
     return ApiResponse.ok(
-        data={"task_ids": task_ids, "task_record_ids": task_record_ids},
-        message=f"已创建 {len(task_ids)} 个 AI 重构任务",
+        data={"task_ids": task_ids, "task_record_ids": task_record_ids, "task_type": resolved_type},
+        message=f"已创建 {len(task_ids)} 个 AI 任务（{resolved_type}）",
     )
 
 
@@ -187,3 +215,35 @@ async def review_ai_task(
     await session.commit()
     assets = await AiTaskService.list_result_assets(session, result)
     return ApiResponse.ok(data=AiTaskResultVo.from_model(result, assets=assets), message="审核已提交")
+
+
+@router.post("/ai-tasks/{task_id}/select-title", summary="选定标题候选（写入下游发布链路读的 output_title）")
+async def select_ai_title_candidate(
+    task_id: int,
+    payload: AiTitleSelectRequest,
+    session: DbSession,
+    operator: CurrentOperator,
+) -> ApiResponse[AiTaskResultVo]:
+    """★ 把选中的那条候选写进 `AiTaskResult.output_title`。
+
+    ★★ 为什么单独开这个端点（而不是复用 review 的 edit）★★
+        `output_title` 是 **Basic 发布链路读标题的唯一字段**
+        （`PublishService._build_payload()` / `_persist_listing()`）。
+        只有把它写回去，"AI 出候选 → 人工选 → 上架用选中那条"才真正闭环；
+        同时落 `selected_title_index` / `selected_title_at` / `selected_title_by` 三件套，
+        保证事后能追溯"这条标题是谁在什么时候挑的第几条"。
+    """
+    result = await AiTaskService.select_title_candidate(
+        session,
+        task_id,
+        index=payload.index,
+        title=payload.title,
+        note=payload.note or "",
+        operator=operator.name,
+    )
+    await session.commit()
+    assets = await AiTaskService.list_result_assets(session, result)
+    return ApiResponse.ok(
+        data=AiTaskResultVo.from_model(result, assets=assets),
+        message=f"已选定标题候选 #{result.selected_title_index}",
+    )

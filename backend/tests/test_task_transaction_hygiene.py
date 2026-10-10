@@ -144,14 +144,17 @@ def test_run_task_is_three_phase_by_construction() -> None:
         if isinstance(node, ast.AsyncWith):
             with_ranges.append((node.lineno, node.end_lineno or node.lineno))
 
+    # ★ 四种能力（ai_rework / image_redraw / title_suggest / video_script）的等待点
+    #   **全部**纳入护栏：新能力的 await 若被搬进 helper，本断言会因 `wait_lines` 缺失而失败。
     wait_lines = [
         node.lineno
         for node in ast.walk(func)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "rework_images"
+        and node.func.attr
+        in {"rework_images", "redraw_images", "suggest_titles", "suggest_video_script"}
     ]
-    assert wait_lines, "run_task 必须调用 rework_images"
+    assert wait_lines, "run_task 必须直接调用 AI 客户端的产出方法（不得整体搬进 helper）"
     for line in wait_lines:
         assert not any(start <= line <= end for start, end in with_ranges), (
             "★ 事务纪律 A：`rework_images()` 的等待不得写在任何 `async with` 会话块内"

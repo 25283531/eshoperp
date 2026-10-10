@@ -123,6 +123,32 @@ class AiTaskResult(BaseMixin, Base):
     banned_words_json: Mapped[list[Any] | None] = mapped_column(
         JSONType, nullable=True, comment="违禁词 / 极限词命中（AIR-P0-04）"
     )
+    # ★ 标题候选数组（0005 新增）：`AiTitleCandidate.to_dict()` 的列表，≥3 条。
+    #   为什么单开一列而不是复用 `output_title`：后者是 **String(512) 单条**，装不下 N 条候选，
+    #   而且语义也不同 —— `output_title` = 当前生效那条（首选 / 人工选定后的那条），
+    #   本列 = 当初 AI 给过哪几条。「展示候选给人挑」与「上架用哪条」是两个不同的问题。
+    output_title_candidates_json: Mapped[list[Any] | None] = mapped_column(
+        JSONType, nullable=True, comment="标题候选数组（AiTitleCandidate 列表），供使用者挑选"
+    )
+    # ★ 短视频拍摄脚本（0005 新增）：`AiVideoScriptResult.to_dict()` —— title/style/scenes[]/时长。
+    #   ★ 不塞进 `output_attributes_json`：那一列是给平台上架模板填的类目属性，
+    #     混入脚本会让模板渲染拿到一堆无关键（属性是给机器读的，脚本是给人读的）。
+    #   ★ 只存文案，不含任何视频文件：本能力明确「只出文案，不生成视频」。
+    output_video_script_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONType, nullable=True, comment="短视频拍摄脚本（AiVideoScriptResult），只含文案"
+    )
+    # ★ 选中留痕三件套（0005 新增）：回答「这条标题是谁在什么时候从候选里挑的第几条」。
+    #   为什么不能只改 `output_title`：改完之后 `output_title` 与候选数组里任何一条都对不上号，
+    #   使用者事后问「这个链接当时为什么用这个标题」查不到依据。
+    selected_title_index: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="人工选中的标题候选下标（对应 output_title_candidates_json，0 起）"
+    )
+    selected_title_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="人工选中标题候选的时间"
+    )
+    selected_title_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="人工选中标题候选的操作人"
+    )
     review_status: Mapped[str] = mapped_column(
         String(16), nullable=False, default=ReviewStatus.PENDING.value, comment="pending/approved/rejected"
     )

@@ -11,7 +11,16 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.adapters.ai.base import AiInputPrompt, AiTaskContext, AiTimeoutError
+from app.adapters.ai.base import (
+    AiImagePrompt,
+    AiInputPrompt,
+    AiRedrawResult,
+    AiReworkResult,
+    AiTaskContext,
+    AiTimeoutError,
+    AiTitleCandidate,
+    AiVideoScriptResult,
+)
 from app.adapters.ai.factory import AiClientFactory, resolve_ai_client_name
 from app.core.errors import BusinessError, ErrorCode, NotFoundError, StateConflictError
 from app.core.logging import get_logger, get_trace_id
@@ -37,6 +46,26 @@ __all__ = ["AiTaskRunPlan", "AiTaskService"]
 
 # 默认重构项
 DEFAULT_REWORK_ITEMS = ["main_image", "detail_image", "title", "attribute"]
+
+# ★★ 任务类型分派表：`ai_task.task_type` → AI 客户端方法名 ★★
+#   ★ 为什么队列 `TaskType` 仍然**只有 `ai_rework` 一种**（不是遗漏，是刻意取舍）：
+#       `TaskType` 回答"这条异步任务由哪个 handler 执行"，
+#       `AiTaskType`（`ai_task.task_type`）回答"这条 AI 任务要为使用者产出什么"。
+#       三种新能力的执行骨架完全一样（① 短事务读参数 → ② 无事务等产出 → ③ 短事务落库），
+#       再复制三个 handler 只是把同一段代码抄四遍、并把"要产出什么"这个信息
+#       在两张表上各存一份（**两个真相源**，改一处忘一处就会对不上）。
+#       因此队列类型保持 `ai_rework` 不变，真正的种类只记在 `ai_task.task_type` 上，
+#       由 `run_task()` 在这里按类型分派到对应能力。
+#
+#   ★ 本表是**合法取值集合**（`create_tasks()` 校验、`run_task()` 报错文案都用它）；
+#     真正的分派在 `run_task()` 里用 `if/elif` 写死、不走 `getattr` 动态取 ——
+#     原因见那里的注释：事务纪律 A 的结构性护栏必须能在源码里看见真实的等待点。
+AI_TASK_TYPE_DISPATCH: dict[str, str] = {
+    AiTaskType.AI_REWORK.value: "rework_images",
+    AiTaskType.IMAGE_REDRAW.value: "redraw_images",
+    AiTaskType.TITLE_SUGGEST.value: "suggest_titles",
+    AiTaskType.VIDEO_SCRIPT.value: "suggest_video_script",
+}
 
 
 @dataclass
@@ -137,14 +166,52 @@ class AiTaskService:
         target_platform: str,
         rework_items: list[str] | None = None,
         template_version: str | None = None,
+        task_type: str | None = None,
+        input_prompt: AiInputPrompt | None = None,
+        global_prompt: str | None = None,
+        image_prompts: list[AiImagePrompt] | None = None,
+        title_prompt: str | None = None,
+        video_script_prompt: str | None = None,
         operator: str = "system",
     ) -> list[AiTask]:
-        """批量创建 AI 重构任务（状态 `queued`）。"""
+        """批量创建 AI 任务（状态 `queued`）。
+
+        ★ 新增入参**全部可空**：老调用方不传时行为与改动前完全一致。
+
+        Args:
+            task_type: AI 任务类型（`AiTaskType`）；None → `ai_rework`（存量口径）。
+            input_prompt: 完整提示词契约（传了就以它为准）。
+            global_prompt / image_prompts / title_prompt / video_script_prompt:
+                分字段入参；`input_prompt` 为空时由这些字段组装成 `AiInputPrompt`。
+        """
         if not source_product_ids:
             raise BusinessError("source_product_ids 不能为空", code=ErrorCode.PARAM_ERROR)
+        if task_type is not None and task_type not in AI_TASK_TYPE_DISPATCH:
+            raise BusinessError(
+                f"不支持的 AI 任务类型：{task_type}，可用：{', '.join(sorted(AI_TASK_TYPE_DISPATCH))}",
+                code=ErrorCode.PARAM_ERROR,
+            )
 
         config = await AiTaskService.concurrency_config(session)
         items = rework_items or list(DEFAULT_REWORK_ITEMS)
+        prompt_payload = input_prompt or AiInputPrompt(
+            global_prompt=str(global_prompt or ""),
+            images=list(image_prompts or []),
+            title_prompt=str(title_prompt or ""),
+            video_script_prompt=str(video_script_prompt or ""),
+        )
+        # ★ 一个提示词都没给时**不落空壳** `{}`：NULL 的语义是"使用者没填过提示词"，
+        #   而 `{}` 看着像"填过但都是空串"，两者在查问题时不是一回事（同 0005 迁移的口径）。
+        has_prompt = any(
+            (
+                prompt_payload.global_prompt,
+                prompt_payload.title_prompt,
+                prompt_payload.video_script_prompt,
+                [p for p in prompt_payload.images if str(p.prompt or "").strip()],
+            )
+        )
+        input_prompt_json = prompt_payload.to_dict() if has_prompt else None
+        resolved_task_type = task_type or AiTaskType.AI_REWORK.value
         # ★ README 第九节第 17 条：AI 客户端必须在**创建时固化**到行上，
         #   否则"切换 ai.client 后在途任务仍按原客户端跑完"这条口径在数据结构上无从实现
         #   （0004 之前该列根本不存在）。这里读的是同一套解析逻辑（含 SystemSetting 覆盖）。
@@ -164,8 +231,9 @@ class AiTaskService:
             task = AiTask(
                 source_product_id=int(product_id),
                 target_platform=target_platform,
-                task_type=AiTaskType.AI_REWORK.value,
+                task_type=resolved_task_type,
                 ai_client=client_name,
+                input_prompt_json=input_prompt_json,
                 rework_items_json=list(items),
                 template_version=template_version,
                 status=AiTaskStatus.QUEUED.value,
@@ -213,7 +281,37 @@ class AiTaskService:
             # ★ 放进 try：客户端取不到时也要走 `mark_failed()`，
             #   否则任务会永远停在 running（"客户端没了"是永久性故障，不会自愈）。
             client = AiClientFactory.instantiate(plan.ai_client_name)
-            result = await client.rework_images(plan.context)
+
+            # ★★ ② 阶段：按 `ai_task.task_type` 分派到对应能力 ★★
+            #   ★ 四个 `await` **故意**都留在 `run_task()` 里，不抽进 helper：
+            #     `tests/test_task_transaction_hygiene.py` 用 AST 断言「等产出的调用
+            #     不得位于任何 `async with` 会话块内」（事务纪律 A 的**结构性护栏**）。
+            #     把 await 藏进 helper 会让这条护栏失效 —— 它只读 `run_task` 的源码，
+            #     看不见 helper 里的等待点。宁可这里长一点，也要让护栏看得见真实的等待。
+            task_type = str(plan.task_type or AiTaskType.AI_REWORK.value)
+            title_candidates: list[AiTitleCandidate] | None = None
+            video_script: AiVideoScriptResult | None = None
+            if task_type == AiTaskType.AI_REWORK.value:
+                # ★ 存量路径：**行为一字不改**（回归的核心），仍是一体产出图 + 标题 + 属性。
+                result: AiReworkResult = await client.rework_images(plan.context)
+            elif task_type == AiTaskType.IMAGE_REDRAW.value:
+                redraw: AiRedrawResult = await client.redraw_images(plan.context)
+                result = AiTaskService.adapt_redraw(redraw)
+            elif task_type == AiTaskType.TITLE_SUGGEST.value:
+                suggest = await client.suggest_titles(plan.context)
+                result = AiTaskService.adapt_title_suggest(suggest)
+                # ★ 候选数组**原样**交给落库（含每条的风格 / 依据 / 分数），
+                #   否则前端只能展示"当前那条"，使用者无从比较。
+                title_candidates = list(suggest.candidates)
+            elif task_type == AiTaskType.VIDEO_SCRIPT.value:
+                script: AiVideoScriptResult = await client.suggest_video_script(plan.context)
+                result = AiTaskService.adapt_video_script(script)
+                video_script = script
+            else:
+                raise BusinessError(
+                    f"未知的 AI 任务类型：{task_type}（可用：{', '.join(sorted(AI_TASK_TYPE_DISPATCH))}）",
+                    code=ErrorCode.PARAM_ERROR,
+                )
         except Exception as exc:  # noqa: BLE001  记录失败后原样抛出（AiTimeoutError 保持可重试语义）
             await AiTaskService.mark_failed(plan.ai_task_id, exc)
             logger.warning(
@@ -229,8 +327,59 @@ class AiTaskService:
             result,
             client_name=client.client_name,
             operator=operator,
+            title_candidates=title_candidates,
+            video_script=video_script,
         )
         return await AiTaskService.load_task(plan.ai_task_id)
+
+    # ==================================================================
+    #  新能力产出 → 既有落库口径的适配器（★ 只做结构转换，不含任何 IO）
+    # ==================================================================
+    #
+    # ★★ 为什么统一降级成 `AiReworkResult`（而不是给每种能力写一套落库）★★
+    #     `persist_result()` 是既有的、被存量 `ai_rework` 链路依赖的落库实现，
+    #     三种新能力**复用它**即可（图片走 `images`，标题走 `title_result`），
+    #     新造一套落库等于把同一段"落 asset / 落结果 / 转 pending_review / 写审计"
+    #     抄两遍，且两边行为迟早分叉。
+
+    @staticmethod
+    def adapt_redraw(redraw: AiRedrawResult) -> AiReworkResult:
+        """图片重绘产出 → 落库口径（**只灌图片**，不掺标题 / 属性）。"""
+        return AiReworkResult(
+            images=list(redraw.images),
+            model_name=redraw.model_name,
+            prompt_snapshot=redraw.prompt_snapshot,
+            elapsed_ms=redraw.elapsed_ms,
+            raw=dict(redraw.raw or {}),
+        )
+
+    @staticmethod
+    def adapt_title_suggest(suggest: Any) -> AiReworkResult:
+        """标题建议产出 → 落库口径（`to_title_result()` 把最高分那条降级成老口径单条）。
+
+        ★ `output_title` 先落到"首选"：人工挑完由 `select_title_candidate()` 覆盖，
+          这样即便使用者一条都不挑，下游发布链路也拿得到一条像样的标题。
+        """
+        return AiReworkResult(
+            title_result=suggest.to_title_result(),
+            model_name=suggest.model_name,
+            prompt_snapshot=suggest.prompt_snapshot,
+            elapsed_ms=suggest.elapsed_ms,
+            raw=dict(suggest.raw or {}),
+        )
+
+    @staticmethod
+    def adapt_video_script(script: AiVideoScriptResult) -> AiReworkResult:
+        """视频脚本产出 → 落库口径（无图、无标题改写，只带模型名与提示词快照留痕）。
+
+        ★ 不碰 `output_title` 的既有回落逻辑（货源原标题）—— 改回落就会动到存量口径。
+        """
+        return AiReworkResult(
+            model_name=script.model_name,
+            prompt_snapshot=script.prompt_snapshot,
+            elapsed_ms=script.elapsed_ms,
+            raw=dict(script.raw or {}),
+        )
 
     @staticmethod
     async def prepare(task_id: int, *, operator: str = "system") -> AiTaskRunPlan:
@@ -317,14 +466,18 @@ class AiTaskService:
         *,
         client_name: str = "",
         operator: str = "system",
+        title_candidates: list[AiTitleCandidate] | None = None,
+        video_script: AiVideoScriptResult | None = None,
     ) -> int:
         """③ 短事务：落素材 → 落结果 → 转 `pending_review` → 提交。
 
         Args:
             task_id: AI 任务 ID。
-            result: `AiReworkResult`。
+            result: `AiReworkResult`（三种新能力由 `invoke_capability()` 统一降级成它）。
             client_name: AI 客户端名（审计留痕）。
             operator: 操作人。
+            title_candidates: 标题候选数组（仅 `title_suggest`），落 `output_title_candidates_json`。
+            video_script: 视频脚本（仅 `video_script`），落 `output_video_script_json`。
 
         Returns:
             `AiTaskResult.id`。
@@ -363,9 +516,20 @@ class AiTaskService:
                 if exists is not None:
                     asset_ids.append(int(exists))
                     continue
+                # ★ 主图 / 详情图的判定：**产出方标了 `image_role` 就以它为准**，
+                #   没标（存量 `ai_rework` 产出）才回落到"第一张是主图"的老规则
+                #   ⇒ 存量路径 asset_type 一个字都不变，新能力又能按角色可靠区分。
+                role = str(image.image_role or "") or (
+                    "main_image" if index == 0 else "detail_image"
+                )
+                # ★ 序号：产出方显式的 `image.index` 优先；老产出该字段恒为 0
+                #   （它是后加的字段，存量产出方不填），此时回落成产出列表中的位置。
+                seq = int(image.index or 0) or index
                 asset = Asset(
                     source_product_id=task.source_product_id,
-                    asset_type=AssetType.MAIN_IMAGE.value if index == 0 else AssetType.DETAIL_IMAGE.value,
+                    asset_type=(
+                        AssetType.MAIN_IMAGE.value if role == "main_image" else AssetType.DETAIL_IMAGE.value
+                    ),
                     origin=AssetOrigin.AI_REWORK.value,
                     storage_path=str(path),
                     content_hash=digest,
@@ -376,6 +540,20 @@ class AiTaskService:
                     height=image.height,
                     size_bytes=image.size_bytes or (path.stat().st_size if path.exists() else None),
                     ai_task_id=task.id,
+                    # ★ 把"这张是主图还是详情图 / 第几张 / 按哪句提示词画的"一起落到 `tags_json`：
+                    #   ① 使用者要"重绘后的图按主图 / 详情页分组展示"，没有这两项就只能靠文件名猜；
+                    #   ② 逐图提示词是否真的生效（`prompt_source=per_image`）要能复盘；
+                    #   ★ 命名规则（中文名 `主图01.jpg` 还是内部名 `main_00.jpg`）**尚未最终确认**，
+                    #     故本次**不动文件名**；把角色与序号落进记录，将来换命名规则时
+                    #     只改文件命名那一处，不必重做整条落库管线。
+                    tags_json={
+                        "tags": [role],
+                        "image_role": role,
+                        "index": int(seq),
+                        "prompt": str(image.prompt or ""),
+                        "prompt_source": str(image.prompt_source or ""),
+                        "source_path": str(image.source_path or ""),
+                    },
                 )
                 session.add(asset)
                 await session.flush()
@@ -393,6 +571,17 @@ class AiTaskService:
                     {"word": w, "type": "banned", "suggestion": "请替换"}
                     for w in (title_result.banned_words if title_result else [])
                 ],
+                # ★ 标题候选数组（仅 `title_suggest` 有值；其余能力留 None 表示"没走过多候选口径"）。
+                #   ★ 为什么存 `to_dict()` 而不是原始对象：这一列要能跨产次回显，
+                #     `char_count` 等派生字段一并固化，前端不必再算一遍。
+                output_title_candidates_json=(
+                    [c.to_dict() for c in title_candidates] if title_candidates else None
+                ),
+                # ★ 视频脚本（仅 `video_script` 有值），`text` 是把脚本渲染好的纯文本，
+                #   前端/导出可直接用，不必再按 scenes 拼一遍。
+                output_video_script_json=(
+                    {**video_script.to_dict(), "text": video_script.to_text()} if video_script else None
+                ),
                 review_status=ReviewStatus.PENDING.value,
                 model_name=result.model_name or client_name,
                 prompt_snapshot=result.prompt_snapshot or "",
@@ -636,6 +825,113 @@ class AiTaskService:
             remark=f"审核 AI 产出：{action} {note}".strip(),
         )
         await session.flush()
+        return result
+
+    @staticmethod
+    async def select_title_candidate(
+        session: Any,
+        task_id: int,
+        *,
+        index: int | None = None,
+        title: str | None = None,
+        note: str = "",
+        operator: str = "system",
+    ) -> AiTaskResult:
+        """★ 选定某条标题候选 —— 让「AI 出候选 → 人工挑 → 上架用那条」闭环。
+
+        ★★ 为什么必须有这一步（而不是让使用者自己改标题）★★
+            ① `output_title` 是**下游发布链路读标题的唯一字段**
+               （`PublishService._build_payload()` / `_persist_listing()` 都从它取），
+               光把候选展示在页面上、却写不回 `output_title`，
+               "选了"与"上架用哪条"就是两回事 —— 使用者以为选了，上架还是用首选那条；
+            ② 选定动作要**可追溯**：写"选了第几条 / 谁 / 什么时候"，
+               否则事后查"这个链接当时为什么用这个标题"无从回答。
+
+        Args:
+            index: 候选下标（0 起）；与 `title` 二选一，**两个都给时以 index 为准**。
+            title: 候选标题原文（候选列表被前端重排过时的兜底定位方式）。
+
+        Returns:
+            更新后的 `AiTaskResult`（`output_title` 已是选中的那条）。
+
+        Raises:
+            NotFoundError: 任务或产出不存在。
+            BusinessError: 没有候选 / 定位不到候选 / index 越界。
+        """
+        task = await AiTaskService.get_task(session, task_id)
+        result = await AiTaskService.latest_result(session, task_id)
+        if result is None:
+            raise NotFoundError(f"AI 任务 {task_id} 尚无可选择的产出")
+
+        raw = result.output_title_candidates_json
+        candidates = [c for c in raw if isinstance(c, dict)] if isinstance(raw, list) else []
+        if not candidates:
+            raise BusinessError(
+                f"AI 任务 {task_id} 没有标题候选可选（该任务类型可能不是 title_suggest）",
+                code=ErrorCode.PARAM_ERROR,
+            )
+
+        picked_index: int | None = None
+        picked: dict[str, Any] | None = None
+        if index is not None:
+            if int(index) >= len(candidates):
+                raise BusinessError(
+                    f"标题候选下标 {index} 越界（共 {len(candidates)} 条）", code=ErrorCode.PARAM_ERROR
+                )
+            picked_index = int(index)
+            picked = candidates[picked_index]
+        elif title:
+            for position, candidate in enumerate(candidates):
+                if str(candidate.get("title", "")) == str(title):
+                    picked_index = position
+                    picked = candidate
+                    break
+            if picked is None:
+                raise BusinessError(f"未在候选中找到标题：{title}", code=ErrorCode.PARAM_ERROR)
+        else:
+            raise BusinessError("index 与 title 至少提供一个", code=ErrorCode.PARAM_ERROR)
+
+        picked_title = str(picked.get("title", "") or "")
+        # ★ 写回下游发布链路真正读的三个字段，`_build_payload()` 无需任何改动即可拿到选中那条。
+        result.output_title = picked_title
+        points = [str(s) for s in (picked.get("selling_points") or [])]
+        if points:
+            result.output_selling_points = "\n".join(points)
+        result.banned_words_json = [
+            {"word": str(w), "type": "banned", "suggestion": "请替换"}
+            for w in (picked.get("banned_words") or [])
+        ]
+        # ★ 选中留痕：选了第几条 / 什么时候 / 谁
+        result.selected_title_index = picked_index
+        result.selected_title_at = utc_now()
+        result.selected_title_by = operator
+        if note:
+            result.review_note = note
+        await session.flush()
+
+        await AuditService.write(
+            session,
+            action_type=AuditActionType.PUBLISH.value,
+            object_type=AuditObjectType.SYSTEM_SETTING.value,
+            object_id=task.id,
+            operator=operator,
+            new_value={
+                "selected_title_index": picked_index,
+                "selected_title": picked_title,
+                "candidate_count": len(candidates),
+                "note": note,
+            },
+            trace_id=get_trace_id(),
+            remark=f"选定标题候选 #{picked_index}：{picked_title}",
+        )
+        await session.flush()
+        logger.info(
+            "ai_title_candidate_selected",
+            ai_task_id=int(task.id),
+            index=picked_index,
+            title=picked_title,
+            operator=operator,
+        )
         return result
 
     @staticmethod
