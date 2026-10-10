@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from sqlalchemy import select
@@ -65,6 +66,42 @@ async def resolve_listing_mode(session: Any = None) -> str:
     return get_settings().listing_mode
 
 
+def _instantiate(
+    adapter_cls: type[ListingAdapter],
+    *,
+    platform_value: str,
+    account: Any = None,
+    config: dict[str, Any] | None = None,
+    session: Any = None,
+    http: Any = None,
+) -> ListingAdapter:
+    """★ 实例化适配器，并在类支持时把 `platform` 传进去。
+
+    ★★ 踩坑记录（P0，实测复现）★★
+        旧实现统一 `adapter_cls(account=..., config=..., session=..., http=...)`，
+        **不传 platform**。而 `ManualListingAdapter.__init__` 的 `platform` 默认值是
+        `Platform.TAOBAO` ⇒ 经本工厂创建的半自动适配器**无论什么平台都是淘宝**：
+        抖店 / 拼多多的任务会被打成 `manual-taobao-*.zip`，README.txt 里写
+        「登录淘宝商家后台」，运营拿着抖店的包去登淘宝，属于直接误导。
+
+        只给「构造函数接受 platform」的类传参（`ManualListingAdapter` /
+        `MockListingAdapter`）；`TaobaoAdapter` / `DouyinAdapter` / `PddAdapter`
+        的 `__init__` 不收该参数且内部硬编码 `self.platform`，按签名过滤对它们零影响。
+
+    Args:
+        adapter_cls: 注册表里取出的适配器类。
+        platform_value: 归一化后的平台字符串（`taobao` / `douyin` / `pdd`）。
+    """
+    kwargs: dict[str, Any] = {"account": account, "config": config, "session": session, "http": http}
+    try:
+        params = inspect.signature(adapter_cls).parameters
+    except (TypeError, ValueError):  # noqa: BLE001  签名不可解析时按不支持处理
+        params = {}
+    if "platform" in params:
+        kwargs["platform"] = platform_value
+    return adapter_cls(**kwargs)
+
+
 class ListingAdapterFactory:
     """上架适配器工厂。"""
 
@@ -109,7 +146,14 @@ class ListingAdapterFactory:
             adapter_cls = MockListingAdapter
             mode_value = ListingMode.MOCK.value
 
-        adapter = adapter_cls(account=account, config=config, session=session, http=http)
+        adapter = _instantiate(
+            adapter_cls,
+            platform_value=platform_value,
+            account=account,
+            config=config,
+            session=session,
+            http=http,
+        )
 
         # ★ 降级：真实适配器未取得资质 → 自动退回 Mock
         if allow_fallback and not adapter.available():
@@ -119,8 +163,14 @@ class ListingAdapterFactory:
                 mode=mode_value,
                 cls=adapter_cls.__name__,
             )
-            adapter = MockListingAdapter(account=account, config=config, session=session, http=http)
-            adapter.platform = Platform(platform_value)  # type: ignore[assignment]
+            adapter = _instantiate(
+                MockListingAdapter,
+                platform_value=platform_value,
+                account=account,
+                config=config,
+                session=session,
+                http=http,
+            )
 
         return adapter
 

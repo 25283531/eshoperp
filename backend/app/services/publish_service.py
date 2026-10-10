@@ -619,18 +619,11 @@ class PublishService:
         title = product.title if product else ""
         attributes: dict[str, Any] = {}
         selling_points: list[str] = []
-        if task.ai_task_result_id:
-            result = (
-                await session.execute(
-                    select(AiTaskResult).where(AiTaskResult.id == int(task.ai_task_result_id))
-                )
-            ).scalars().first()
-            if result is not None:
-                title = result.output_title or title
-                attributes = dict(result.output_attributes_json or {})
-                selling_points = [
-                    s for s in (result.output_selling_points or "").split("\n") if s.strip()
-                ]
+        result = await PublishService._load_ai_result(session, task)
+        if result is not None:
+            title = result.output_title or title
+            attributes = dict(result.output_attributes_json or {})
+            selling_points = [s for s in (result.output_selling_points or "").split("\n") if s.strip()]
 
         return ListingPayload(
             shop_id=task.shop_id,
@@ -645,6 +638,37 @@ class PublishService:
             ai_task_result_id=task.ai_task_result_id,
             trace_id=get_trace_id(),
         )
+
+    @staticmethod
+    async def _load_ai_result(session: Any, task: PublishTask) -> AiTaskResult | None:
+        """★ 读取本任务引用的 AI 重构产出（标题 / 卖点 / 属性的**唯一来源**）。
+
+        ★★ 为什么抽成公共方法 ★★
+            `_build_payload()` 与 `_persist_listing()` 都要用 AI 产出。
+            旧实现只有 `_build_payload()` 读，`_persist_listing()` 直接落
+            `product.title`（货源原标题）⇒ AI 改写后的标题永远进不了
+            `listing_product` 表，运营事后复盘「这个链接当时用的哪个标题」查不到。
+            两处共用本方法，保证「素材包里的标题」与「库里的标题」同源。
+
+        ★ 前置条件：`review_status='approved'` 的硬校验在 `create()` /
+          `precheck()` 入口（`MappingValidator.validate_ai_result_approved`）
+          已经拦过，这里**不再重复过滤**，否则会出现
+          「包里是 AI 标题、库里是原标题」的反向不一致。
+        """
+        if not task.ai_task_result_id:
+            return None
+        return (
+            await session.execute(select(AiTaskResult).where(AiTaskResult.id == int(task.ai_task_result_id)))
+        ).scalars().first()
+
+    @staticmethod
+    async def _resolve_title(session: Any, task: PublishTask, product: SourceProduct | None) -> str:
+        """上架标题：**优先 AI 产出标题**，无 AI 产出时回落到货源原标题。"""
+        title = product.title if product else ""
+        result = await PublishService._load_ai_result(session, task)
+        if result is not None and result.output_title:
+            title = result.output_title
+        return title
 
     @staticmethod
     async def _resolve_sale_price(session: Any, sku: SourceSku | None, task: PublishTask) -> int:
@@ -700,7 +724,8 @@ class PublishService:
                 shop_id=task.shop_id,
                 shop_item_id=shop_item_id,
                 source_product_id=int(task.source_product_id),
-                title=product.title if product else "",
+                # ★ AI 改写标题优先，回落货源原标题（与 _build_payload 同源）
+                title=await PublishService._resolve_title(session, task, product),
                 status=ListingProductStatus.ON_SALE.value,
                 is_mock=is_mock,
                 listing_mode=task.listing_mode,
