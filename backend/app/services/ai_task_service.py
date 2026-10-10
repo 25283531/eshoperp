@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from app.adapters.ai.base import (
     AiImagePrompt,
@@ -707,6 +707,7 @@ class AiTaskService:
         status: str | None = None,
         target_platform: str | None = None,
         source_product_id: int | None = None,
+        task_type: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[AiTask], dict[str, str], int]:
@@ -718,6 +719,11 @@ class AiTaskService:
             stmt = stmt.where(AiTask.target_platform == target_platform)
         if source_product_id is not None:
             stmt = stmt.where(AiTask.source_product_id == int(source_product_id))
+        # ★ 任务类型筛选（`AiTaskType`）：此前 GET /ai-tasks 只认 status / 平台 / 商品，
+        #   前端传 `task_type` 会被**静默忽略**（返回未筛选的结果集）——
+        #   比"不支持"更糟：界面上看着筛选生效了，列表其实没变。
+        if task_type:
+            stmt = stmt.where(AiTask.task_type == task_type.strip())
 
         count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
         total = int((await session.execute(count_stmt)).scalar_one() or 0)
@@ -764,6 +770,49 @@ class AiTaskService:
             return []
         rows = (await session.execute(select(Asset).where(Asset.id.in_(ids)))).scalars().all()
         return list(rows)
+
+    @staticmethod
+    async def list_task_assets(session: Any, task: AiTask, result: AiTaskResult | None) -> list[Asset]:
+        """★ 任务详情要展示的素材：**货源原图 + 本任务的 AI 产出**（一次查询取回）。
+
+        ★ 为什么不只回 AI 产出（即 `list_result_assets`）：
+            ① 使用者要看"改前 / 改后"，缺了原图这栏对比就塌一半；
+            ② 任务还没产出时（`result is None`）详情也该看得见输入的原图，
+               否则 `AiTasks.tsx` 的原图对比栏永远显示"暂无原图"。
+            两者靠 `Asset.origin`（`raw` / `ai_rework`）区分，前端不必再猜。
+
+        ★ 为什么合成一条 SQL：原图与产出图分别查会变成两条，
+          而详情是轮询热点，查询数翻倍就是 N+1 的雏形（这里的 N 虽然固定为 2，
+          但每加一类素材就 +1，容易退化成真的 N+1）。
+        """
+        output_ids = [int(i) for i in ((result.output_asset_ids_json or []) if result else [])]
+        conditions = [Asset.ai_task_id == int(task.id)]
+        if output_ids:
+            conditions.append(Asset.id.in_(output_ids))
+        # ★ 原图：`source_product_id` 相同且 origin=raw（同一商品的素材，含手工上传的）。
+        conditions.append(
+            and_(
+                Asset.source_product_id == int(task.source_product_id),
+                Asset.origin == AssetOrigin.RAW.value,
+            )
+        )
+        rows = (
+            (await session.execute(select(Asset).where(Asset.is_deleted.is_(False), or_(*conditions))))
+            .scalars()
+            .all()
+        )
+
+        def _sort_key(row: Asset) -> tuple[int, int, int, int]:
+            payload = row.tags_json if isinstance(row.tags_json, dict) else {}
+            index = payload.get("index")
+            return (
+                0 if str(row.origin) == AssetOrigin.RAW.value else 1,  # 原图在前
+                0 if str(row.asset_type) == AssetType.MAIN_IMAGE.value else 1,
+                int(index) if isinstance(index, int) else -1,
+                int(row.id or 0),
+            )
+
+        return sorted(rows, key=_sort_key)
 
     @staticmethod
     async def retry(session: Any, task_id: int, *, operator: str = "system") -> AiTask:

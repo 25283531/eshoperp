@@ -50,6 +50,11 @@ class AssetVo(BaseSchema):
     preview_url: str = ""
     ai_task_id: int | None = None
     created_at: str | None = None
+    # ★ 角色与序号（`tags_json["image_role"]` / `tags_json["index"]`）。
+    #   上一棒已把这两项落进 `tags_json`（1688 采集 / AI 重绘都写了），
+    #   但 VO 只取下 `tags_json["tags"]` ⇒ 后端知道、前端拿不到，UI 只能靠文件名猜。
+    image_role: str | None = None
+    index: int | None = None
 
     @classmethod
     def from_model(cls, model: Any, *, preview_url: str = "") -> "AssetVo":
@@ -61,6 +66,15 @@ class AssetVo(BaseSchema):
             tags = [str(t) for t in raw_tags.get("tags", [])]
         else:
             tags = []
+        # ★ 只**补充透出**，不动上面那段 `tags` 的取法 ——
+        #   存量消费方（含只认 `tags` 的前端分组逻辑）行为一字不变。
+        payload = dict(raw_tags) if isinstance(raw_tags, dict) else {}
+        role = payload.get("image_role")
+        raw_index = payload.get("index")
+        try:
+            index = int(raw_index) if raw_index is not None else None
+        except (TypeError, ValueError):
+            index = None
         return cls(
             id=int(model.id or 0),
             source_product_id=model.source_product_id,
@@ -80,6 +94,8 @@ class AssetVo(BaseSchema):
             preview_url=preview_url or f"/api/v1/assets/{model.id}/download",
             ai_task_id=model.ai_task_id,
             created_at=iso_or_none(model.created_at),
+            image_role=str(role) if role else None,
+            index=index,
         )
 
 

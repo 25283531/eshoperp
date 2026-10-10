@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.v1._common import page_of
@@ -18,6 +18,7 @@ from app.core.deps import CurrentOperator, DbSession
 from app.core.errors import NotFoundError
 from app.core.pagination import PageParams, page_params
 from app.core.response import ApiResponse
+from app.models.enums import AssetType
 from app.schemas.asset import (
     AssetRollbackRequest,
     AssetTagUpdate,
@@ -25,7 +26,7 @@ from app.schemas.asset import (
     BatchDownloadRequest,
     BatchDownloadVo,
 )
-from app.services.asset_service import AssetService
+from app.services.asset_service import MAX_UPLOAD_FILES, MAX_UPLOAD_IMAGE_BYTES, AssetService
 
 router = APIRouter(tags=["素材"])
 
@@ -54,6 +55,66 @@ async def list_assets(
         page_size=params.page_size,
     )
     return ApiResponse.ok(data=page_of([AssetVo.from_model(r) for r in rows], total, params))
+
+
+@router.post("/assets/upload", summary="手工上传素材图片（多文件）")
+async def upload_assets(
+    session: DbSession,
+    operator: CurrentOperator,
+    files: Annotated[
+        list[UploadFile],
+        File(description=f"图片文件，一次最多 {MAX_UPLOAD_FILES} 张、单张 ≤{MAX_UPLOAD_IMAGE_BYTES // (1024 * 1024)}MB"),
+    ],
+    source_product_id: Annotated[
+        int | None, Form(description="归属的货源商品 ID")
+    ] = None,
+    role: Annotated[
+        str, Form(description="素材角色：main_image（主图） / detail_image（详情页）")
+    ] = AssetType.MAIN_IMAGE.value,
+) -> ApiResponse[dict[str, Any]]:
+    """★ 手工上传 —— 1688 详情接口权限未开通期间**唯一**的图片入口。
+
+    ★ 为什么这条路必须在（不是退化而是救命）：
+        1688 应用未授权 ⇒ 调用返回 `gw.APIACLDecline` ⇒ 采集链路进不来任何一张真实图片
+        ⇒ AI 重绘这条主链路既没法验证也没法用，前端做好的界面上永远空空如也。
+        手工上传让使用者自己把图送进来，立刻就能跑通"上传 → 素材列表 → 重绘"闭环。
+
+    ★ 落盘口径：`data/assets/raw/{商品ID}/{主图|详情页}/NN.jpg`，
+      与 1688 采集、AI 重绘共用 `utils/kit.asset_path()` 这一个命名函数（中文串只在那里）。
+
+    Returns:
+        `{created[], duplicated[], failed[{filename, reason}], role, source_product_id}` ——
+        逐文件给结论：成功的能拿到 `image_role` / `index`（前端据此分组），
+        被拒的带上可读中文原因（**不静默截断**）。
+
+    Raises:
+        400 / 1001: 没选文件 / 超过数量上限 / 角色非法。
+        404 / 2002: `source_product_id` 指向的商品不存在。
+    """
+    outcome = await AssetService.import_images(
+        session,
+        files,
+        source_product_id=source_product_id,
+        role=role,
+        operator=operator.name,
+    )
+    await session.commit()
+    return ApiResponse.ok(
+        data={
+            "role": role,
+            "source_product_id": source_product_id,
+            "created": [AssetVo.from_model(a) for a in outcome.created],
+            "duplicated": [AssetVo.from_model(a) for a in outcome.duplicated],
+            "failed": outcome.failed,
+            "created_count": len(outcome.created),
+            "duplicated_count": len(outcome.duplicated),
+            "failed_count": len(outcome.failed),
+        },
+        message=(
+            f"上传完成：新增 {len(outcome.created)} 张 / 重复 {len(outcome.duplicated)} 张"
+            + (f"，拒绝 {len(outcome.failed)} 个" if outcome.failed else "")
+        ),
+    )
 
 
 @router.get("/assets/{asset_id}", summary="素材详情")

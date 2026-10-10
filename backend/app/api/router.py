@@ -2,8 +2,9 @@
 
 `app/main.py :: _mount_api_router()` 以 `prefix=settings.api_prefix` 挂载本路由。
 
-★ 端点总数：按 ARCH §5.5 契约实现 **111 个 endpoint**
-  （文档标注 90 个；此处按契约表格逐条落地，含文件下载流与 `/health` 之外的全部条目）。
+★ 端点总数：按 ARCH §5.5 契约实现 **112 个 endpoint**
+  （文档标注 90 个；此处按契约表格逐条落地，含文件下载流与 `/health` 之外的全部条目；
+   `POST /assets/upload` 为 1688 权限未开通期间的手工上传入口，不计入文档标注的那一版）。
 """
 
 from __future__ import annotations

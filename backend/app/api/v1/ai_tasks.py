@@ -27,6 +27,7 @@ from app.schemas.asset import (
     AiTaskReviewRequest,
     AiTaskVo,
     AiTitleSelectRequest,
+    AssetVo,
 )
 from app.services.ai_task_service import AiTaskService
 
@@ -125,13 +126,19 @@ async def list_ai_tasks(
     status: Annotated[str | None, Query()] = None,
     target_platform: Annotated[str | None, Query()] = None,
     source_product_id: Annotated[int | None, Query()] = None,
+    task_type: Annotated[str | None, Query(description="AI 任务类型（AiTaskType）：ai_rework / image_redraw / title_suggest / video_script")] = None,
 ) -> ApiResponse[Any]:
-    """分页返回 AI 任务。"""
+    """分页返回 AI 任务。
+
+    ★ `task_type` 筛选：此前该参数不被识别，前端传了会被静默忽略
+      （返回未筛选的完整列表）—— 界面上看着筛了、数据其实没动。
+    """
     rows, titles, total = await AiTaskService.list_tasks(
         session,
         status=status,
         target_platform=target_platform,
         source_product_id=source_product_id,
+        task_type=task_type,
         page=params.page,
         page_size=params.page_size,
     )
@@ -147,7 +154,9 @@ async def get_ai_task(task_id: int, session: DbSession) -> ApiResponse[AiTaskDet
     """详情含 `result`（产出与审核状态）与 `assets[]`。"""
     task = await AiTaskService.get_task(session, task_id)
     result = await AiTaskService.latest_result(session, task_id)
-    assets = await AiTaskService.list_result_assets(session, result) if result is not None else []
+    # ★ 详情的 `assets` 此前**硬编码空数组**（写了也不用），前端只能绕道再拉一次素材列表，
+    #   任务详情页的"原图对比"栏因此永远空白。这里一次查询取回「原图 + 本任务产出」。
+    assets = await AiTaskService.list_task_assets(session, task, result)
 
     from app.services.source_service import SourceService
 
@@ -158,11 +167,17 @@ async def get_ai_task(task_id: int, session: DbSession) -> ApiResponse[AiTaskDet
     except Exception:  # noqa: BLE001  商品已删除时标题置空即可
         title = None
 
+    # ★ `result.output_assets` 仍**只装 AI 产出**（原图是"输入"，不是这次的产出）；
+    #   这层过滤在内存里做，不额外发查询 —— 详情接口是轮询热点，查询数不能再涨。
+    task_id_int = int(task.id)
+    output_ids = {int(i) for i in ((result.output_asset_ids_json or []) if result else [])}
+    produced = [a for a in assets if int(a.id) in output_ids or a.ai_task_id == task_id_int]
+
     base = AiTaskVo.from_model(task, source_product_title=title)
     detail = AiTaskDetailVo(
         **base.model_dump(),
-        result=AiTaskResultVo.from_model(result, assets=assets) if result is not None else None,
-        assets=[],
+        result=AiTaskResultVo.from_model(result, assets=produced) if result is not None else None,
+        assets=[AssetVo.from_model(a) for a in assets],
     )
     return ApiResponse.ok(data=detail)
 

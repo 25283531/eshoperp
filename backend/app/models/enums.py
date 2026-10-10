@@ -794,6 +794,25 @@ ENUM_DICT: dict[str, list[dict[str, str]]] = {
     # ---- AI 子系统（0004 新增 / 补齐）----
     # 补齐动机：此前这三个枚举只存在于后端，前端为了渲染下拉框只能在本地硬编码，
     #          后端一旦改枚举值，前端不会同步 —— 这正是"枚举漂移"。
+    # ★ `AssetType` / `TaskStatus` 同属"前端已在用、字典里却没有"的一类（0006 补齐）：
+    #   `AssetType` 尤其关键 —— 手工上传与 AI 重绘都按它分主图 / 详情页，
+    #   前端本地兜底一旦与后端枚举漂移，素材分组就会错位。
+    "AssetType": [
+        {"value": AssetType.MAIN_IMAGE.value, "label": "主图"},
+        {"value": AssetType.DETAIL_IMAGE.value, "label": "详情图"},
+        {"value": AssetType.VIDEO.value, "label": "视频"},
+    ],
+    "AssetOrigin": [
+        {"value": AssetOrigin.RAW.value, "label": "原始素材"},
+        {"value": AssetOrigin.AI_REWORK.value, "label": "AI 重绘"},
+    ],
+    "TaskStatus": [
+        {"value": TaskStatus.PENDING.value, "label": "待处理"},
+        {"value": TaskStatus.RUNNING.value, "label": "执行中"},
+        {"value": TaskStatus.SUCCESS.value, "label": "已完成"},
+        {"value": TaskStatus.FAILED.value, "label": "失败"},
+        {"value": TaskStatus.CANCELLED.value, "label": "已取消"},
+    ],
     "AiTaskType": [
         {"value": AiTaskType.AI_REWORK.value, "label": "图文重构"},
         {"value": AiTaskType.IMAGE_REDRAW.value, "label": "图片重绘"},
