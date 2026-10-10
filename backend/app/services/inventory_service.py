@@ -31,6 +31,7 @@ from app.models.enums import (
     AuditObjectType,
     InventoryChangeType,
     InventorySource,
+    ListingProductStatus,
     SettingKey,
 )
 from app.models.inventory import InventorySnapshot, PriceSnapshot
@@ -288,17 +289,22 @@ class InventoryService:
     async def _decorate_alerts_with_source(
         session: Any, alerts: list[InventoryAlertVo]
     ) -> list[InventoryAlertVo]:
-        """给告警回填 `data_source` 与 `auto_offline_allowed`（一次批量查询）。
+        """给告警回填 `data_source`、`auto_offline_allowed`、`listing_product_ids`（各一次批量查询）。
 
-        ★ 两个字段都由 `inventory_snapshot.source` 推出，与 `_apply_actions` 的裁决
-          **同源同键**，UI 展示的结论与系统真正的行为不会两张皮。
+        ★ `data_source` / `auto_offline_allowed` 两个字段都由 `inventory_snapshot.source`
+          推出，与 `_apply_actions` 的裁决**同源同键**，UI 展示的结论与系统真正的行为
+          不会两张皮。
+
+        ★ `listing_product_ids` 由 `_candidate_products_by_source_sku()` **一次**批量预取
+          （不是逐条查），供告警页直接发起人工下架 —— 见该方法的注释。
         """
         if not alerts:
             return alerts
-        sources = await InventoryService._latest_snapshot_sources(
-            session, [int(a.source_sku_id) for a in alerts]
-        )
+        sku_ids = [int(a.source_sku_id) for a in alerts]
+        sources = await InventoryService._latest_snapshot_sources(session, sku_ids)
+        candidates = await InventoryService._candidate_products_by_source_sku(session, sku_ids)
         for alert in alerts:
+            alert.listing_product_ids = list(candidates.get(int(alert.source_sku_id), []))
             snapshot_source = sources.get(int(alert.source_sku_id), "")
             alert.data_source = snapshot_source or InventoryService.UNKNOWN_SOURCE_LABEL
             # ★ 与 `_apply_actions` 的裁决规则逐字一致：缺货看数据源，涨价不看
@@ -430,6 +436,72 @@ class InventoryService:
             if not result.get(key):  # 按时间倒序：首次出现的就是该 SKU 的最新快照
                 result[key] = str(source or "")
         return result
+
+    @staticmethod
+    async def _candidate_products_by_source_sku(
+        session: Any, source_sku_ids: list[int]
+    ) -> dict[int, list[int]]:
+        """★ 批量预取「可人工下架」的平台商品 ID：`{source_sku_id: [listing_product_id, ...]}`。
+
+        供 `InventoryAlertVo.listing_product_ids` 回填，使告警页能直接发起人工下架。
+
+        ------------------------------------------------------------------
+        为什么必须一次批量查，不能在循环里逐条调 `_products_by_source_sku()`
+        ------------------------------------------------------------------
+        `_products_by_source_sku()` 内部是 **3 次查询**（映射 id → 商品 id → 商品对象）。
+        逐条调用就是 N+1：`ALERT_SCAN_LIMIT=200` 的告警扫描上限下，最坏放大到上千次查询。
+        这里改为一次 `IN (...)` + 内存聚合（写法同 `_latest_snapshot_sources()`）。
+
+        ------------------------------------------------------------------
+        为什么不直接复用 `_products_by_source_sku()` 来填这个字段
+        ------------------------------------------------------------------
+        它过滤的是 `status == "on_sale"`（服务于**自动**下架：只下在售的），
+        与本次口径「排除 `off_shelf`」不同。用它填会把「只剩 publishing/failed 商品的告警」
+        显示成「无关联商品」，运营看到「建议下架」却没有下架入口 —— 新的误导源。
+
+        ------------------------------------------------------------------
+        过滤口径（逐条对应 `offline()` 的真实前置）
+        ------------------------------------------------------------------
+        * `sku_mapping`：排除 `is_deleted` / `is_mock`，且 `listing_product_id` 非空；
+        * `listing_product`：排除 `is_deleted` / `is_mock`；
+        * `status != 'off_shelf'` —— `ListingService.offline()` 对已下架商品抛
+          `StateConflictError`（HTTP 409 / code 1005，不幂等），放进列表一点就报错。
+          注意是「排除 off_shelf」而**不是**「只留 on_sale」：`publishing` / `failed`
+          都能正常下架，只留 on_sale 会漏掉真实可下的商品。
+
+        Args:
+            session: 数据库会话。
+            source_sku_ids: 货源 SKU ID 列表。
+
+        Returns:
+            每个 SKU 对应的**去重后**平台商品 ID 列表（升序）；无关联则为空列表。
+        """
+        ids = sorted({int(i) for i in source_sku_ids if i is not None})
+        if not ids:
+            # ★ 空输入直接返回，不发 SQL：`IN ()` 在部分方言下是语法错误。
+            return {}
+        rows = (
+            await session.execute(
+                select(SkuMapping.source_sku_id, ListingProduct.id)
+                .join(ListingProduct, ListingProduct.id == SkuMapping.listing_product_id)
+                .where(
+                    SkuMapping.source_sku_id.in_(ids),
+                    SkuMapping.listing_product_id.isnot(None),
+                    SkuMapping.is_deleted.is_(False),
+                    SkuMapping.is_mock.is_(False),
+                    ListingProduct.is_deleted.is_(False),
+                    ListingProduct.is_mock.is_(False),
+                    ListingProduct.status != ListingProductStatus.OFF_SHELF.value,
+                )
+            )
+        ).all()
+        # 同一个 listing_product 可能经多条 mapping 命中（一货多铺 / 一商品多 SKU），需去重
+        buckets: dict[int, set[int]] = {key: set() for key in ids}
+        for source_sku_id, product_id in rows:
+            key = int(source_sku_id)
+            if product_id is not None:
+                buckets.setdefault(key, set()).add(int(product_id))
+        return {key: sorted(value) for key, value in buckets.items()}
 
     @staticmethod
     async def _apply_actions(

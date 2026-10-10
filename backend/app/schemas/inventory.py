@@ -104,6 +104,30 @@ class InventoryAlertVo(BaseSchema):
     data_source: str = "unknown"  # erp_poll / third_party_push / manual_import / manual_edit / unknown
     auto_offline_allowed: bool = False  # False ⇒ 不自动执行，仅告警 + 人工一键下架
 
+    # ★ 与本告警的 `source_sku_id` 关联、且**当前状态不是 `off_shelf`** 的平台商品 ID 列表。
+    #   前端据此在告警页直接调已有的批量下架接口，不必再跑到平台商品页去找是哪个商品。
+    #   由 `InventoryService._candidate_products_by_source_sku()` 一次批量预取后回填。
+    #
+    #   为什么是复数 `list[int]` 而不是单数：
+    #       一个货源 SKU 可以同时供给多个店铺 / 多个平台。**跨平台铺货是正常业务** ——
+    #       `models/mapping.py` 把它明确定位为「仅提示，永不拦截」（P1），且 `sku_mapping`
+    #       上唯一的唯一索引 `uq_sku_mapping_shop_sku` 只约束「一店铺SKU → 一映射」，
+    #       **不约束反向**（一货源SKU → 多映射完全合法）。用单数字段会把其余商品静默丢掉，
+    #       运营点了下架、货还在别的店卖 —— 这是「发错货」方向的缺陷，比漏报更难自查。
+    #
+    #   为什么排除已下架（`off_shelf`）：
+    #       `ListingService.offline()` 对已处于 `off_shelf` 的商品抛 `StateConflictError`
+    #       → HTTP 409 / code 1005，且**不幂等**。把已下架商品放进列表，前端一点就报 409。
+    #
+    #   为什么不是「只保留 `on_sale`」：
+    #       `offline()` 只拦 `off_shelf` 这一种状态，`publishing` / `failed` 都能正常下架。
+    #       若这里只留 `on_sale`，会把「有货可下」误判成「没有」，运营就看不到下架入口 ——
+    #       与告警本身「建议下架」的结论自相矛盾。故本字段的口径严格是「排除 off_shelf」。
+    listing_product_ids: list[int] = Field(
+        default_factory=list,
+        description="与本告警关联、且当前未下架的平台商品 ID（可直接人工下架）",
+    )
+
 
 class AutoOfflineRecordVo(BaseSchema):
     """自动下架记录响应体。
