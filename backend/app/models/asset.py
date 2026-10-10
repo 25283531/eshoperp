@@ -65,8 +65,14 @@ class AiTask(BaseMixin, Base):
         comment="AI 任务类型（AiTaskType）：ai_rework/image_redraw/title_suggest/video_script",
     )
     # ★ 使用者输入的提示词（**输入侧**；产出侧回填的快照在 ai_task_result.prompt_snapshot）。
-    #   结构见 AiInputPrompt：{"global": str, "images": [{"index":0,"prompt":..}], ...}
+    #   结构见 `app/adapters/ai/base.py:AiInputPrompt`，键名**逐字照抄**它：
+    #     {"global_prompt": str, "images": [{"index": 0, "prompt": str, "asset_id": int|null,
+    #                                        "source_path": str, "tag": str}],
+    #      "title_prompt": str, "video_script_prompt": str, "extra": {}}
     #   —— 用一个 JSON 列同时表达「全局提示词」与「逐图提示词」，不逐图开列。
+    #   ★ 注释曾把全局提示词写成 "global"，而实现收发的是 "global_prompt"：
+    #     照错的键写代码会取到 None，且**不报错**（只是提示词静默失效），
+    #     排查成本极高 —— 键名一律以 AiInputPrompt.to_dict() 为准。
     input_prompt_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSONType, nullable=True, default=dict, comment="使用者输入的提示词（全局 + 逐图），见 AiInputPrompt"
     )

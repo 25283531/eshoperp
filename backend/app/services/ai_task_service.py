@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.adapters.ai.base import AiTaskContext, AiTimeoutError
+from app.adapters.ai.base import AiInputPrompt, AiTaskContext, AiTimeoutError
 from app.adapters.ai.factory import AiClientFactory, resolve_ai_client_name
 from app.core.errors import BusinessError, ErrorCode, NotFoundError, StateConflictError
 from app.core.logging import get_logger, get_trace_id
@@ -51,6 +51,11 @@ class AiTaskRunPlan:
     source_product_id: int = 0
     original_title: str = ""
     context: AiTaskContext = field(default_factory=lambda: AiTaskContext(task_id=""))
+    # ★ 创建时固化的 AI 客户端名（README 第九节第 17 条）：
+    #   ② 阶段（无事务等待期）必须**凭它**取客户端，绝不能再去读当前配置 ——
+    #   否则"切换 ai.client 后在途任务仍按原客户端跑完"这条保证就无从落地。
+    ai_client_name: str = ""
+    task_type: str = ""
 
 
 class AiTaskService:
@@ -196,11 +201,18 @@ class AiTaskService:
         """
         plan = await AiTaskService.prepare(task_id, operator=operator)
 
-        # ★ session 是 keyword-only 形参：必须写 create(session=session)，
-        #   写成 create(session) 会把会话绑到 name 上（见 AiClientFactory.create 的守卫）。
-        client = await AiClientFactory.create()
-
+        # ★★ 按任务行上**固化的** `ai_client` 取客户端，而不是读当前配置 ★★
+        #   这正好补上 README 第九节第 17 条留下的缺口（原话：该要求"在数据结构上无法实现"，
+        #   0004 补上列之后剩下"还没把值用起来"）：切换 ai.client 后，在途任务仍按原通道跑完。
+        #
+        # ★ 用 `instantiate()` 而非 `create()`：② 阶段按事务纪律 A **不得持有会话**，
+        #   而 `create()` 在 name 为空时会自己开会话读 SystemSetting。
+        # ★ 客户端不可用时**明确报错**（instantiate 抛 1099），**绝不静默回落到默认客户端** ——
+        #   静默回落会让上面这条保证形同虚设：看着在跑，其实已经换了通道。
         try:
+            # ★ 放进 try：客户端取不到时也要走 `mark_failed()`，
+            #   否则任务会永远停在 running（"客户端没了"是永久性故障，不会自愈）。
+            client = AiClientFactory.instantiate(plan.ai_client_name)
             result = await client.rework_images(plan.context)
         except Exception as exc:  # noqa: BLE001  记录失败后原样抛出（AiTimeoutError 保持可重试语义）
             await AiTaskService.mark_failed(plan.ai_task_id, exc)
@@ -256,6 +268,11 @@ class AiTaskService:
             ).scalars().first()
             image_paths = await AiTaskService.collect_source_image_paths(session, int(task.source_product_id))
 
+            # ★ 把使用者输入的提示词灌进上下文：全局 / 逐图 / 标题 / 视频脚本四类。
+            #   `AiInputPrompt.from_dict()` 是防御性的：None / 空 dict / 乱码结构
+            #   一律退化为**空契约**，绝不让一句脏 JSON 把整个任务打崩。
+            input_prompt = AiInputPrompt.from_dict(task.input_prompt_json)
+
             context = AiTaskContext(
                 task_id=str(task.id),
                 target_platform=task.target_platform,
@@ -265,12 +282,19 @@ class AiTaskService:
                 source_image_paths=image_paths,
                 selling_points=[],
                 attributes_json=dict(product.params_json or {}) if product else {},
+                image_prompts=list(input_prompt.image_prompts),
+                global_prompt=input_prompt.global_prompt,
+                title_prompt=input_prompt.title_prompt,
+                video_script_prompt=input_prompt.video_script_prompt,
+                task_type=str(task.task_type or AiTaskType.AI_REWORK.value),
             )
             plan = AiTaskRunPlan(
                 ai_task_id=int(task.id),
                 source_product_id=int(task.source_product_id),
                 original_title=(product.title if product else ""),
                 context=context,
+                ai_client_name=str(task.ai_client or ""),
+                task_type=context.task_type,
             )
             # ★ 立即提交：把写事务的持有时长压到"读参数"这一小段
             await session.commit()
@@ -279,6 +303,9 @@ class AiTaskService:
             "ai_task_prepared",
             ai_task_id=plan.ai_task_id,
             image_count=len(plan.context.source_image_paths),
+            image_prompt_count=len(plan.context.image_prompts),
+            task_type=plan.task_type,
+            ai_client=plan.ai_client_name,
             operator=operator,
         )
         return plan

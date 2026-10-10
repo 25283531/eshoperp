@@ -27,6 +27,7 @@ __all__ = [
     "DEFAULT_AI_CLIENT",
     "AiClientFactory",
     "create_ai_client",
+    "instantiate_ai_client",
     "register_ai_client",
     "resolve_ai_client_name",
 ]
@@ -119,6 +120,36 @@ class AiClientFactory:
     """AI 客户端工厂。"""
 
     @staticmethod
+    def is_registered(name: str) -> bool:
+        """该客户端名是否已注册（调用方先问一句，比 catch 异常便宜）。"""
+        return str(name) in AI_CLIENT_REGISTRY
+
+    @staticmethod
+    def instantiate(name: str, **kwargs: Any) -> AiClient:
+        """★ **显式按名字**创建客户端：**不读任何配置、不开数据库会话**（同步）。
+
+        ★ 为什么需要它：`AiTaskService.run_task()` 的 ② 阶段（等待 AI 产出，最长几十分钟）
+          按事务纪律 A **绝不能持有会话**；而 `create()` 在 name 为空时为了读
+          `SystemSetting['ai.client']` 会自己开一个会话 —— 在那里用 `create()` 就是踩线。
+          "在途任务按创建时固化的 `ai_client` 跑完"这条口径，靠的就是这里的显式指定。
+
+        Raises:
+            BusinessError: 1099 —— 客户端名未注册。**绝不静默回落到默认客户端**：
+                静默回落会让"按原通道跑完"的保证形同虚设（看着在跑，其实换了通道）。
+        """
+        client_name = str(name)
+        factory_fn = AI_CLIENT_REGISTRY.get(client_name)
+        if factory_fn is None:
+            logger.error("ai_client_not_registered", requested=client_name)
+            raise BusinessError(
+                f"AI 客户端 {client_name} 未注册，可用：{', '.join(sorted(AI_CLIENT_REGISTRY))}",
+                code=ErrorCode.INTERNAL_ERROR,
+            )
+        client = factory_fn(**kwargs) if kwargs else factory_fn()
+        logger.info("ai_client_instantiated", client=client_name)
+        return client
+
+    @staticmethod
     async def create(name: str | None = None, *, session: Any = None, **kwargs: Any) -> AiClient:
         """创建 AI 客户端实例。
 
@@ -142,16 +173,7 @@ class AiClientFactory:
                 "要传数据库会话必须用关键字：AiClientFactory.create(session=session)"
             )
         client_name = name or await resolve_ai_client_name(session)
-        factory_fn = AI_CLIENT_REGISTRY.get(client_name)
-        if factory_fn is None:
-            logger.error("ai_client_not_found_fallback", requested=client_name, fallback=DEFAULT_AI_CLIENT)
-            raise BusinessError(
-                f"AI 客户端 {client_name} 未注册，可用：{', '.join(sorted(AI_CLIENT_REGISTRY))}",
-                code=ErrorCode.INTERNAL_ERROR,
-            )
-        client = factory_fn(**kwargs) if kwargs else factory_fn()
-        logger.info("ai_client_created", client=client_name)
-        return client
+        return AiClientFactory.instantiate(client_name, **kwargs)
 
     @staticmethod
     def list_clients() -> list[dict[str, Any]]:
@@ -165,3 +187,8 @@ class AiClientFactory:
 async def create_ai_client(name: str | None = None, *, session: Any = None, **kwargs: Any) -> AiClient:
     """便捷函数：等价于 `AiClientFactory.create(...)`。"""
     return await AiClientFactory.create(name, session=session, **kwargs)
+
+
+def instantiate_ai_client(name: str, **kwargs: Any) -> AiClient:
+    """便捷函数：等价于 `AiClientFactory.instantiate(...)`（同步、显式按名、不读配置）。"""
+    return AiClientFactory.instantiate(name, **kwargs)
