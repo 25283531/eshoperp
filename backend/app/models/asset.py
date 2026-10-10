@@ -9,7 +9,7 @@ from sqlalchemy import Boolean, DateTime, Integer, String, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, BaseMixin, JSONType, SoftDeleteMixin
-from app.models.enums import AiTaskStatus, AssetOrigin, AssetType, ReviewStatus
+from app.models.enums import AiClientName, AiTaskStatus, AiTaskType, AssetOrigin, AssetType, ReviewStatus
 
 
 class Asset(BaseMixin, SoftDeleteMixin, Base):
@@ -55,6 +55,27 @@ class AiTask(BaseMixin, Base):
 
     source_product_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="FK → source_product.id")
     target_platform: Mapped[str] = mapped_column(String(32), nullable=False, comment="目标平台")
+    # ★ 任务类型：`rework_items_json` 是"要做哪几项"的**子项列表**（AiReworkItem），
+    #   它回答不了"这条 AI 任务到底要产出什么"，故单独设本列（AiTaskType）。
+    task_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=AiTaskType.AI_REWORK.value,
+        server_default=AiTaskType.AI_REWORK.value,
+        comment="AI 任务类型（AiTaskType）：ai_rework/image_redraw/title_suggest/video_script",
+    )
+    # ★ 使用者输入的提示词（**输入侧**；产出侧回填的快照在 ai_task_result.prompt_snapshot）。
+    #   结构见 AiInputPrompt：{"global": str, "images": [{"index":0,"prompt":..}], ...}
+    #   —— 用一个 JSON 列同时表达「全局提示词」与「逐图提示词」，不逐图开列。
+    input_prompt_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONType, nullable=True, default=dict, comment="使用者输入的提示词（全局 + 逐图），见 AiInputPrompt"
+    )
+    ai_client: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=AiClientName.FILE_BRIDGE.value,
+        comment="创建时固化的 AI 客户端名（README 第九节第 17 条：切换配置后在途任务仍按原客户端跑完）",
+    )
     rework_items_json: Mapped[list[Any]] = mapped_column(
         JSONType, nullable=False, default=list, comment='重构项 ["main_image","detail_image","title","attribute"]'
     )
@@ -74,6 +95,7 @@ class AiTask(BaseMixin, Base):
     __table_args__ = (
         Index("ix_ai_task_status", "status", "priority"),
         Index("ix_ai_task_product", "source_product_id"),
+        Index("ix_ai_task_type", "task_type"),
     )
 
     def __repr__(self) -> str:  # noqa: D105

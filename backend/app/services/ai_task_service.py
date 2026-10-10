@@ -12,12 +12,13 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.adapters.ai.base import AiTaskContext, AiTimeoutError
-from app.adapters.ai.factory import AiClientFactory
+from app.adapters.ai.factory import AiClientFactory, resolve_ai_client_name
 from app.core.errors import BusinessError, ErrorCode, NotFoundError, StateConflictError
 from app.core.logging import get_logger, get_trace_id
 from app.models.asset import AiTask, AiTaskResult, Asset
 from app.models.enums import (
     AiTaskStatus,
+    AiTaskType,
     AssetOrigin,
     AssetType,
     AuditActionType,
@@ -139,6 +140,10 @@ class AiTaskService:
 
         config = await AiTaskService.concurrency_config(session)
         items = rework_items or list(DEFAULT_REWORK_ITEMS)
+        # ★ README 第九节第 17 条：AI 客户端必须在**创建时固化**到行上，
+        #   否则"切换 ai.client 后在途任务仍按原客户端跑完"这条口径在数据结构上无从实现
+        #   （0004 之前该列根本不存在）。这里读的是同一套解析逻辑（含 SystemSetting 覆盖）。
+        client_name = await resolve_ai_client_name(session)
         tasks: list[AiTask] = []
         for product_id in source_product_ids:
             product = (
@@ -154,6 +159,8 @@ class AiTaskService:
             task = AiTask(
                 source_product_id=int(product_id),
                 target_platform=target_platform,
+                task_type=AiTaskType.AI_REWORK.value,
+                ai_client=client_name,
                 rework_items_json=list(items),
                 template_version=template_version,
                 status=AiTaskStatus.QUEUED.value,

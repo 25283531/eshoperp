@@ -136,8 +136,44 @@ class ReviewStatus(_StrEnum):
     REJECTED = "rejected"
 
 
+class AiTaskType(_StrEnum):
+    """AI 任务类型（`ai_task.task_type`）—— 回答"这条 AI 任务要产出什么"。
+
+    ★★ 与 `TaskType`（异步任务框架类型）是**两个维度**，不要混用 ★★
+        `TaskType`   回答"这条异步任务由哪个 handler 执行"（`TaskType.AI_REWORK` 是其中一种）；
+        本枚举      回答"这条 AI 任务要为使用者产出什么结果"（图片 / 标题 / 视频脚本）。
+        两者可以组合：同一批 AI 任务都由 `TaskType.AI_REWORK` 的 handler 承载，
+        但按本枚举区分要跑图片重绘还是只要标题建议。
+
+    ★ `AI_REWORK` 同时是**存量数据的默认值**：0004 迁移把历史行一律回填为它，
+      因为迁移前存在的所有行都确属老"图文重构"任务。
+    """
+
+    AI_REWORK = "ai_rework"  # 图文重构（主图 / 详情图 / 标题 / 属性一体，存量默认值）
+    IMAGE_REDRAW = "image_redraw"  # 图片重绘：主图 / 详情页图重画，**逐图可单独给提示词**
+    TITLE_SUGGEST = "title_suggest"  # 商品标题建议：**给出 3 条以上候选**供挑选
+    VIDEO_SCRIPT = "video_script"  # 短视频拍摄脚本建议（可带拍摄风格 / 内容倾向提示词）
+
+
+class AiClientName(_StrEnum):
+    """AI 客户端名（`ai_task.ai_client` / `SystemSetting['ai.client']`）。
+
+    ★ 取值 vocabulary 与 `app/adapters/ai/factory.py:AI_CLIENT_REGISTRY` 一致；
+      **默认值不在这里定义** —— 默认值的单一真相源是 `Settings.ai_client`
+      （`factory.py` 的 `DEFAULT_AI_CLIENT` 从它派生），此处再写一个会退回"两个默认值"。
+    """
+
+    MOCK = "mock"
+    FILE_BRIDGE = "file_bridge"
+    HTTP = "http"
+
+
 class AiReworkItem(_StrEnum):
-    """AI 重构项。"""
+    """AI 重构项。
+
+    ★ 这是"本次重构要做哪几项"的**子项列表**（落在 `ai_task.rework_items_json`），
+      **不是任务类型** —— 任务类型看 `AiTaskType`，两者正交。
+    """
 
     MAIN_IMAGE = "main_image"
     DETAIL_IMAGE = "detail_image"
@@ -755,6 +791,40 @@ ENUM_DICT: dict[str, list[dict[str, str]]] = {
         {"value": ChangeSource.SYSTEM.value, "label": "系统"},
         {"value": ChangeSource.THIRD_PARTY.value, "label": "第三方"},
     ],
+    # ---- AI 子系统（0004 新增 / 补齐）----
+    # 补齐动机：此前这三个枚举只存在于后端，前端为了渲染下拉框只能在本地硬编码，
+    #          后端一旦改枚举值，前端不会同步 —— 这正是"枚举漂移"。
+    "AiTaskType": [
+        {"value": AiTaskType.AI_REWORK.value, "label": "图文重构"},
+        {"value": AiTaskType.IMAGE_REDRAW.value, "label": "图片重绘"},
+        {"value": AiTaskType.TITLE_SUGGEST.value, "label": "商品标题建议"},
+        {"value": AiTaskType.VIDEO_SCRIPT.value, "label": "短视频脚本建议"},
+    ],
+    "AiTaskStatus": [
+        {"value": AiTaskStatus.QUEUED.value, "label": "排队中"},
+        {"value": AiTaskStatus.RUNNING.value, "label": "执行中"},
+        {"value": AiTaskStatus.PENDING_REVIEW.value, "label": "待审核"},
+        {"value": AiTaskStatus.APPROVED.value, "label": "已通过"},
+        {"value": AiTaskStatus.REJECTED.value, "label": "已驳回"},
+        {"value": AiTaskStatus.FAILED.value, "label": "失败"},
+        {"value": AiTaskStatus.CANCELLED.value, "label": "已取消"},
+    ],
+    "AiReworkItem": [
+        {"value": AiReworkItem.MAIN_IMAGE.value, "label": "主图"},
+        {"value": AiReworkItem.DETAIL_IMAGE.value, "label": "详情图"},
+        {"value": AiReworkItem.TITLE.value, "label": "标题"},
+        {"value": AiReworkItem.ATTRIBUTE.value, "label": "属性"},
+    ],
+    "ReviewStatus": [
+        {"value": ReviewStatus.PENDING.value, "label": "待审核"},
+        {"value": ReviewStatus.APPROVED.value, "label": "已通过"},
+        {"value": ReviewStatus.REJECTED.value, "label": "已驳回"},
+    ],
+    "AiClientName": [
+        {"value": AiClientName.FILE_BRIDGE.value, "label": "文件桥（WorkBuddy）"},
+        {"value": AiClientName.HTTP.value, "label": "HTTP API"},
+        {"value": AiClientName.MOCK.value, "label": "Mock（占位图）"},
+    ],
 }
 
 
@@ -767,8 +837,10 @@ __all__ = [
     "TERMINAL_ORDER_STATUSES",
     "AdapterName",
     "AfterSaleHandlingStatus",
+    "AiClientName",
     "AiReworkItem",
     "AiTaskStatus",
+    "AiTaskType",
     "AssetOrigin",
     "AssetType",
     "AuditActionType",
