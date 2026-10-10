@@ -987,7 +987,13 @@ export interface InventoryAlertVo {
   threshold: string;
   suggested_action: 'offline' | 'notify';
   detected_at: IsoTimeStr;
-  /** ★ F11 库存数据源。后端 `InventoryService._fill_alert_source()` 回填。 */
+  /**
+   * ★ F11 库存数据源。后端 `InventoryService._decorate_alerts_with_source()` 回填。
+   *
+   * ⚠️ 此处原写 `_fill_alert_source()` —— **该方法在后端根本不存在**，
+   *    只在这个注释里出现过。指向不存在的方法比不写注释更糟：
+   *    后人按名字去搜会一无所获，进而怀疑实现丢了。已更正为真实方法名。
+   */
   data_source: string;
   /** ★ F11 可否自动下架。false ⇒ 只告警，不自动执行，需人工一键下架。 */
   auto_offline_allowed: boolean;
