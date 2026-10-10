@@ -148,14 +148,14 @@ async def test_file_bridge_three_capabilities(tmp_path: Any) -> None:
                     "images": [
                         {
                             "index": 0,
-                            "local_path": "data/ai_output/cap-001/main_01.png",
+                            "local_path": "data/ai_output/cap-001/主图/01.png",
                             "image_role": "main_image",
                             "prompt": "白底主图",
                             "prompt_source": "per_image",
                         },
                         {
                             "index": 1,
-                            "local_path": "data/ai_output/cap-001/detail_01.png",
+                            "local_path": "data/ai_output/cap-001/详情页/01.png",
                             "image_role": "detail_image",
                             "prompt": "场景图",
                         },

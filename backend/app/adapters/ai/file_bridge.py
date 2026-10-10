@@ -110,13 +110,15 @@ PROMPT_TEMPLATE = """# {task_type_label}
 DELIVERY_TEMPLATES: dict[str, str] = {
     "ai_rework": """## 交付要求
 
-1. 重构后的图片保存到 `data/ai_output/{task_id}/` 目录（主图 `main_01.png`，详情图 `detail_01.png` …）；
+1. 重构后的图片保存到 `data/ai_output/{task_id}/` 目录，**按角色分中文子目录、文件名用两位序号**：
+   主图 → `data/ai_output/{task_id}/主图/01.png`，详情图 → `data/ai_output/{task_id}/详情页/01.png`、
+   `详情页/02.png` …（**各自从 01 起连续编号**，不要写 `main_01.png` / `detail_01.png`，下游按目录分组）；
 2. 在同目录写 `result.json`，结构如下（缺字段将按默认值处理）：
 
 ```json
 {{
   "images": [
-    {{"local_path": "data/ai_output/{task_id}/main_01.png", "width": 800, "height": 800, "prompt": "..."}}
+    {{"local_path": "data/ai_output/{task_id}/主图/01.png", "width": 800, "height": 800, "prompt": "..."}}
   ],
   "title_result": {{"title": "改写后的标题", "selling_points": ["..."], "banned_words": []}},
   "attribute_result": {{"attributes_json": {{"品牌": "..."}}, "category_id": "..."}},
@@ -129,7 +131,9 @@ DELIVERY_TEMPLATES: dict[str, str] = {
     "image_redraw": """## 交付要求（图片重绘）
 
 1. **逐张**重绘上表的图片，每张严格按它自己那行的提示词画，产出保存到 `data/ai_output/{task_id}/`
-   （主图 `main_01.png`，详情图 `detail_01.png` …）；
+   下的**中文子目录**、文件名用两位序号：
+   主图 → `data/ai_output/{task_id}/主图/01.png`，详情图 → `data/ai_output/{task_id}/详情页/01.png`、
+   `详情页/02.png` …（**各自从 01 起连续编号**，不要写 `main_01.png` / `detail_01.png`，下游按目录分组）；
 2. 在同目录写 `result.json`，结构如下（缺字段将按默认值处理）：
 
 ```json
@@ -138,7 +142,7 @@ DELIVERY_TEMPLATES: dict[str, str] = {
     "images": [
       {{
         "index": 0,
-        "local_path": "data/ai_output/{task_id}/main_01.png",
+        "local_path": "data/ai_output/{task_id}/主图/01.png",
         "source_path": "原图本地路径（照抄上表）",
         "image_role": "main_image",
         "width": 800,

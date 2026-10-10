@@ -43,6 +43,7 @@ from app.utils.kit import (
     MANUAL_ID_PREFIX,
     SOURCE_PLATFORM_KEY,
     SOURCE_PLATFORM_MANUAL,
+    allocate_asset_path,
     content_hash_bytes,
     iso_utc,
     manual_source_id,
@@ -639,6 +640,9 @@ class SourceService:
         #   只看数据库会让第二次 INSERT 直接撞 `uq_asset_content_hash` ⇒ IntegrityError，
         #   把整个采集任务打挂。因此必须再在本次批处理内去重。
         batch_hashes: set[str] = set()
+        # ★ 角色内各自计数（主图 01、02…，详情页 01、02…）：序号与"第几张主图"对齐，
+        #   而不是与"整批第几个"对齐 —— 使用者手动上架时就是按这个分组拿图的。
+        role_counters: dict[str, int] = {}
 
         for index, (url, asset_type) in enumerate(list(items)[:MAX_DOWNLOAD_IMAGES]):
             url_str = str(url or "").strip()
@@ -665,8 +669,13 @@ class SourceService:
             batch_hashes.add(digest)
 
             is_main = asset_type == AssetType.MAIN_IMAGE.value
-            filename = f"{'main' if is_main else 'detail'}_{index:02d}.jpg"
-            target = assets_dir / filename
+            role = AssetType.MAIN_IMAGE.value if is_main else AssetType.DETAIL_IMAGE.value
+            role_counters[role] = role_counters.get(role, 0) + 1
+            # ★ 中文子目录 + 序号文件名（`主图/01.jpg`、`详情页/01.jpg`）：
+            #   唯一命名口径在 `utils/kit.asset_path()`，此处不写死任何中文串。
+            target = allocate_asset_path(
+                assets_dir, role=role, index=role_counters[role], ext=".jpg", content_hash=digest
+            )
             target.write_bytes(data)
             session.add(
                 Asset(

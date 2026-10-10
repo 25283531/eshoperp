@@ -38,7 +38,7 @@ from app.models.enums import (
 from app.models.source import SourceProduct
 from app.models.system import SystemSetting
 from app.services.audit_service import AuditService
-from app.utils.kit import content_hash_file, iso_utc, utc_now
+from app.utils.kit import allocate_asset_path, content_hash_file, iso_utc, utc_now
 
 logger = get_logger(__name__)
 
@@ -484,6 +484,9 @@ class AiTaskService:
         """
         from pathlib import Path
 
+        import shutil
+
+        from app.core.config import get_settings
         from app.core.database import get_session_factory
 
         factory = get_session_factory()
@@ -497,7 +500,15 @@ class AiTaskService:
                 await session.execute(select(SourceProduct).where(SourceProduct.id == task.source_product_id))
             ).scalars().first()
 
+            # ★ AI 产出的归属目录：`assets/ai/{商品ID}/`（与 1688 原始素材 `assets/raw/{商品ID}/` 对称）。
+            #   用货源商品 ID 而不是 task_id：素材库是**按商品**看的，按任务分目录会让
+            #   同一商品的多次重绘散落在互不相干的目录里。
+            product_key = str(
+                getattr(product, "product_1688_id", None) or task.source_product_id
+            )
+            ai_assets_dir = get_settings().assets_dir / "ai" / product_key
             asset_ids: list[int] = []
+            role_counters: dict[str, int] = {}
             for index, image in enumerate(result.images or []):
                 path = Path(image.local_path or "")
                 if not path.exists():
@@ -525,6 +536,22 @@ class AiTaskService:
                 # ★ 序号：产出方显式的 `image.index` 优先；老产出该字段恒为 0
                 #   （它是后加的字段，存量产出方不填），此时回落成产出列表中的位置。
                 seq = int(image.index or 0) or index
+                # ★ 落盘到统一命名（`assets/ai/{商品ID}/主图/01.png`）：
+                #   AI 客户端写的是它自己的产出目录（`assets/ai|mock/<task_id>/…`），
+                #   那里按任务组织、不是按商品组织，使用者在素材库里看不出分组。
+                #   ★ 这里**复制**而不是搬走：客户端产出目录留一份，`result.json` 里的
+                #     `local_path` 不会因落库而失效，重跑也幂等。
+                role_counters[role] = role_counters.get(role, 0) + 1
+                canonical = allocate_asset_path(
+                    ai_assets_dir,
+                    role=role,
+                    index=role_counters[role],
+                    ext=path.suffix or ".png",
+                    content_hash=digest,
+                )
+                if canonical.resolve() != path.resolve():
+                    shutil.copy2(path, canonical)
+                path = canonical
                 asset = Asset(
                     source_product_id=task.source_product_id,
                     asset_type=(
@@ -543,9 +570,9 @@ class AiTaskService:
                     # ★ 把"这张是主图还是详情图 / 第几张 / 按哪句提示词画的"一起落到 `tags_json`：
                     #   ① 使用者要"重绘后的图按主图 / 详情页分组展示"，没有这两项就只能靠文件名猜；
                     #   ② 逐图提示词是否真的生效（`prompt_source=per_image`）要能复盘；
-                    #   ★ 命名规则（中文名 `主图01.jpg` 还是内部名 `main_00.jpg`）**尚未最终确认**，
-                    #     故本次**不动文件名**；把角色与序号落进记录，将来换命名规则时
-                    #     只改文件命名那一处，不必重做整条落库管线。
+                    #   ★ 命名规则**已拍板**：中文子目录 + 序号（`主图/01.jpg`），
+                    #     唯一口径在 `utils/kit.asset_path()`。记录里仍然保留角色与序号，
+                    #     因为文件名只能表达"目录 + 序号"，表达不了"按哪句提示词画的"。
                     tags_json={
                         "tags": [role],
                         "image_role": role,

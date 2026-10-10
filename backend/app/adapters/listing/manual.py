@@ -46,7 +46,7 @@ from app.adapters.fulfillment.manifest import AdapterResult, HealthStatus
 from app.core.config import get_settings
 from app.core.errors import BusinessError, ErrorCode
 from app.core.logging import get_logger
-from app.models.enums import ListingMode, Platform
+from app.models.enums import AssetType, ListingMode, Platform
 from app.models.listing import ListingProduct
 from app.utils.kit import iso_utc, json_dumps, make_zip_package, safe_filename, utc_now
 
@@ -222,7 +222,16 @@ class ManualListingAdapter(ListingAdapter):
         stem = safe_filename(f"manual-{self.platform.value}-{payload.source_product_id}-{int(time.time())}")
         zip_path = base_dir / f"{stem}.zip"
 
-        image_files = [p for p in list(payload.main_images) + list(payload.detail_images) if p and Path(p).exists()]
+        # ★ 包内路径交给 `make_zip_package` 按角色分组（`images/主图/01.jpg`、
+        #   `images/详情页/01.jpg`）：使用者在 Windows 解压后按目录就能分清主图与详情页，
+        #   不必靠文件名猜。`roles` 与 `files` 一一对应，缺失文件连同角色一起滤掉。
+        paired = [
+            (path, AssetType.MAIN_IMAGE.value if group == "main" else AssetType.DETAIL_IMAGE.value)
+            for group, images in (("main", payload.main_images), ("detail", payload.detail_images))
+            for path in list(images or [])
+        ]
+        image_files = [p for p, _ in paired if p and Path(p).exists()]
+        image_roles = [role for p, role in paired if p and Path(p).exists()]
         form_data = self.build_form_data(payload)
         readme = self.build_readme(payload)
 
@@ -237,6 +246,7 @@ class ManualListingAdapter(ListingAdapter):
                 dest=zip_path,
                 extra_files=extra_files,
                 base_dir="images",
+                roles=image_roles,
             )
         except Exception as exc:  # noqa: BLE001
             return AdapterResult.fatal(method="build_manual_package", error=exc)

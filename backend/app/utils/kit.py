@@ -258,6 +258,89 @@ _MOCK_SEQ = 0
 
 
 # ---------------------------------------------------------------------------
+#  ★ 素材文件命名（中文子目录 + 序号文件名）—— 全项目唯一命名口径
+# ---------------------------------------------------------------------------
+# ★ 使用者拍板的最终形态（不是纯中文文件名 `主图01.jpg`，也不是英文 `main_00.jpg`）：
+#       data/assets/raw/{商品ID}/主图/01.jpg
+#       data/assets/raw/{商品ID}/详情页/01.jpg
+# ★ 序号按**角色内**从 1 开始连续编号（主图 / 详情页各自计数），
+#   于是"主图第 1 张"和"详情页第 1 张"都是 01 —— 与他手工上架时的分组习惯一致。
+# ★ 中文字符串**只允许出现在这里**：1688 采集落盘、AI 重绘落库、素材包 ZIP 三处
+#   一律调 `asset_path()`。散落各处 = 以后改一处漏三处，这是本函数存在的唯一理由。
+ASSET_ROLE_MAIN = "main_image"
+ASSET_ROLE_DETAIL = "detail_image"
+ASSET_ROLE_DIRNAMES: dict[str, str] = {ASSET_ROLE_MAIN: "主图", ASSET_ROLE_DETAIL: "详情页"}
+ASSET_SEQ_START = 1
+
+# ★ 旧英文命名的反解（`main_00.jpg` → `("main_image", 0)`），**只给存量迁移脚本用**。
+_LEGACY_ASSET_NAME_RE = re.compile(r"^(main|detail)_(\d{1,3})\.([A-Za-z0-9]+)$")
+
+
+def asset_path(base_dir: str | Path, *, role: str, index: int, ext: str = ".jpg") -> Path:
+    """★ 素材落盘的**唯一命名口径**：`{base_dir}/{主图|详情页}/{序号:02d}{ext}`。
+
+    Args:
+        base_dir: 该素材的归属目录（如 `data/assets/raw/{商品ID}`）。
+        role: `main_image`（→ `主图/`）或 `detail_image`（→ `详情页/`）；
+            其它值（含空串）一律按 `详情页` 处理，绝不让脏角色值生成第三个目录。
+        index: 角色内序号，从 1 起（`0` 会被抬到 `1`）。
+        ext: 扩展名，带不带点都行（`.png` / `png`），留空回落 `.jpg`。
+
+    Returns:
+        完整路径 `Path`，如 `data/assets/raw/123/主图/01.jpg`。
+    """
+    dirname = ASSET_ROLE_DIRNAMES.get(str(role or "").strip()) or ASSET_ROLE_DIRNAMES[ASSET_ROLE_DETAIL]
+    suffix = str(ext or "").strip()
+    if suffix and not suffix.startswith("."):
+        suffix = f".{suffix}"
+    seq = max(int(index), ASSET_SEQ_START)
+    return Path(base_dir) / dirname / f"{seq:02d}{suffix or '.jpg'}"
+
+
+def allocate_asset_path(
+    base_dir: str | Path,
+    *,
+    role: str,
+    index: int,
+    ext: str = ".jpg",
+    content_hash: str = "",
+) -> Path:
+    """落盘前取一个**不会覆盖其它内容**的路径（顺延被占用的序号）并建好目录。
+
+    ★ 为什么需要它：命名从"带索引的英文名"换成"角色内连续序号"后，
+      同一商品**再次采集 / 再次重绘**时新图会撞上旧图的 `主图/01.jpg`。
+      直接覆盖会让**旧 asset 记录**的 `storage_path` 指向一份字节已被换掉的文件
+      （预览看着还在，其实图已经变了）。这里遇到"同序号但是不同内容"就往后顺延，
+      旧记录仍旧指向旧文件，新内容落到新序号 —— 与 `content_hash` 去重互补。
+    """
+    seq = max(int(index), ASSET_SEQ_START)
+    target = asset_path(base_dir, role=role, index=seq, ext=ext)
+    while target.exists() and content_hash:
+        try:
+            occupied = content_hash_file(target) != content_hash
+        except OSError:  # 读不动就当被占用，换下一个序号
+            occupied = True
+        if not occupied:
+            break
+        seq += 1
+        target = asset_path(base_dir, role=role, index=seq, ext=ext)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def parse_legacy_asset_name(name: str) -> tuple[str, int] | None:
+    """反解旧英文文件名：`main_00.jpg` → `("main_image", 0)`；非旧命名返回 None。
+
+    ★ 只服务一次性存量迁移（`scripts/migrate_asset_naming.py`）；新代码不得依赖它。
+    """
+    match = _LEGACY_ASSET_NAME_RE.match(str(name or "").strip())
+    if not match:
+        return None
+    role = ASSET_ROLE_MAIN if match.group(1) == "main" else ASSET_ROLE_DETAIL
+    return role, int(match.group(2))
+
+
+# ---------------------------------------------------------------------------
 #  ZIP 打包（半自动素材包）
 # ---------------------------------------------------------------------------
 
@@ -268,6 +351,7 @@ def make_zip_package(
     extra_files: Mapping[str, str] | None = None,
     base_dir: str | Path | None = None,
     arcname_map: Mapping[str, str] | None = None,
+    roles: Sequence[str] | None = None,
 ) -> str:
     """打包半自动素材包 ZIP。
 
@@ -277,6 +361,13 @@ def make_zip_package(
         extra_files: 额外写入的文本文件 `{包内相对路径: 文本内容}`（如 README.txt）。
         base_dir: 文件在包内的根目录，默认 `images/`。
         arcname_map: 指定单个文件的包内路径（覆盖默认规则）。
+        roles: 与 `files` 一一对应的角色（`main_image` / `detail_image`）；
+            不给时退回"第 0 张是主图、其余详情图"的老推断。
+
+    ★ 中文包内路径的编码：`zipfile` 对非 ASCII 的 `str` 条目名会自动置
+      UTF-8 标志位（general purpose bit 11 / 0x800）。**必须有这个标志位** ——
+      缺了它 Windows 资源管理器按 CP437/GBK 解码，中文目录名解压出来就是乱码；
+      这个 ZIP 恰恰是使用者手动上架要用的素材包，乱码等于白做。
 
     Returns:
         生成的 ZIP 绝对路径字符串。
@@ -284,6 +375,7 @@ def make_zip_package(
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     root = str(base_dir or "images").strip("/")
+    counters: dict[str, int] = {}
 
     with zipfile.ZipFile(dest_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for index, item in enumerate(files):
@@ -293,8 +385,11 @@ def make_zip_package(
             if arcname_map and str(item) in arcname_map:
                 arcname = arcname_map[str(item)]
             else:
-                suffix = file_path.suffix or ".jpg"
-                arcname = f"{root}/{'main' if index == 0 else 'detail'}_{index:02d}{suffix}"
+                role = str(roles[index]) if roles and index < len(roles) else ""
+                if role not in ASSET_ROLE_DIRNAMES:
+                    role = ASSET_ROLE_MAIN if index == 0 else ASSET_ROLE_DETAIL
+                counters[role] = counters.get(role, 0) + 1
+                arcname = asset_path(root, role=role, index=counters[role], ext=file_path.suffix).as_posix()
             archive.write(file_path, arcname=arcname)
 
         for name, content in (extra_files or {}).items():
@@ -347,12 +442,18 @@ def chunked(items: Iterable[Any], size: int) -> list[list[Any]]:
 
 
 __all__ = [
+    "ASSET_ROLE_DETAIL",
+    "ASSET_ROLE_DIRNAMES",
+    "ASSET_ROLE_MAIN",
+    "ASSET_SEQ_START",
     "ISO_FORMAT",
     "MANUAL_ID_PREFIX",
     "SOURCE_PLATFORM_1688",
     "SOURCE_PLATFORM_KEY",
     "SOURCE_PLATFORM_MANUAL",
     "add_hours",
+    "allocate_asset_path",
+    "asset_path",
     "chunked",
     "content_hash_bytes",
     "content_hash_file",
@@ -368,6 +469,7 @@ __all__ = [
     "mock_sku_code",
     "parse_1688_product_id",
     "parse_iso",
+    "parse_legacy_asset_name",
     "safe_filename",
     "signature_matches",
     "spec_signature",

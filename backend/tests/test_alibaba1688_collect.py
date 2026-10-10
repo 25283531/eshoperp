@@ -307,4 +307,17 @@ async def test_download_assets_writes_files_and_dedupes(session, monkeypatch: py
 
     main_row = next(row for row in rows if row.asset_type == AssetType.MAIN_IMAGE.value)
     assert main_row.origin_url == "https://x.test/main.jpg"
-    assert main_row.storage_path.endswith("main_00.jpg")
+    # ★ 命名规则已改为「中文子目录 + 序号」：主图第 1 张 = `主图/01.jpg`
+    assert main_row.storage_path.replace("\\", "/").endswith("/主图/01.jpg"), (
+        f"主图落盘路径不符合新命名：{main_row.storage_path}"
+    )
+    detail_paths = sorted(
+        row.storage_path.replace("\\", "/") for row in rows if row.asset_type == AssetType.DETAIL_IMAGE.value
+    )
+    assert [p.rsplit("/", 2)[-2] for p in detail_paths] == ["详情页", "详情页"], (
+        f"详情图必须落在 `详情页/` 子目录：{detail_paths}"
+    )
+    assert [Path(p).name for p in detail_paths] == ["01.jpg", "02.jpg"], (
+        f"详情图序号应从 01 起连续：{detail_paths}"
+    )
+    assert len({Path(p).parent for p in detail_paths}) == 1, "两张详情图必须同属一个 `详情页/` 目录"
