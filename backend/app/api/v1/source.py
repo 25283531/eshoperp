@@ -155,8 +155,16 @@ async def create_source_product_manual(
 ) -> ApiResponse[dict[str, Any]]:
     """★ 单条手工录入：`source_platform='manual'`，一次请求带 SKU 列表。
 
-    ★ 为什么必须有这个端点：1688 采集需要开放平台凭证，个体户拿不到；
-      没有手工入口就意味着系统里一条货源都进不来，整条主路径起不了步。
+    ★ 为什么必须有这个端点（2026-10-10 更正，原措辞已过期）：
+      旧写法是「1688 采集需要开放平台凭证，个体户拿不到」——**已不成立**。
+      使用者的 1688 自建应用凭证（AppKey / AppSecret / access_token）**已经拿到并已入库**，
+      签名链路也实测可用（`system/currentTime` 返回 200）。
+      真正卡住的是：商品详情接口 `alibaba.product.get` 需要应用被**授予调用权限**，
+      当前尚未开通，调用返回 `gw.APIACLDecline`（属账号侧配置，不是代码缺陷，
+      详见 README 第 28 条）。
+      因此在权限开通前，自动采集进不来货 —— 没有手工入口就意味着系统里一条货源都没有，
+      整条主路径起不了步。**即便权限开通后，手工录入仍是必要补充**：
+      1688 上找不到的货、以及图片走手工上传（`POST /assets/upload`）的场景都依赖它。
 
     ★ 写入的数据**必须能被下游消费**：录入后可进 AI 重构、可建 SKU 映射、
       可半自动上架、可被订单匹配命中（见 `scripts/verify_manual_source_chain.py` 的真实 HTTP 证据）。
