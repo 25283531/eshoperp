@@ -5,6 +5,7 @@ import {
   Button,
   Col,
   Descriptions,
+  Divider,
   Drawer,
   Empty,
   Form,
@@ -16,12 +17,14 @@ import {
   Select,
   Space,
   Table,
+  Tabs,
   Tag,
   Typography,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { SettingOutlined, FullscreenExitOutlined, FullscreenOutlined } from '@ant-design/icons';
+import { Link } from 'react-router-dom';
+import { SettingOutlined, FullscreenExitOutlined, FullscreenOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import {
@@ -33,9 +36,11 @@ import {
   retryAiTask,
   updateAiConcurrency,
 } from '@/api/ai';
+import { getSourceProduct } from '@/api/catalog';
 import type { AiTaskVo, BannedWordVo } from '@/api/types';
 import PageContainer from '@/components/PageContainer';
 import StatusTag from '@/components/StatusTag';
+import { TitleCandidatesPanel, VideoScriptPanel } from '@/components/AiResultPanels';
 import { formatTime } from '@/components/AuditTimeline';
 import { useEnumOptions } from '@/hooks/useEnumOptions';
 import { usePagination } from '@/hooks/usePagination';
@@ -174,6 +179,12 @@ export default function AiTasks(): JSX.Element {
         ),
       },
       {
+        title: '任务类型',
+        dataIndex: 'task_type',
+        width: 130,
+        render: (value: string) => <StatusTag enumKey="AiTaskType" value={value} />,
+      },
+      {
         title: '目标平台',
         dataIndex: 'target_platform',
         width: 100,
@@ -233,9 +244,21 @@ export default function AiTasks(): JSX.Element {
 
   const detail = detailQuery.data;
   const result = detail?.result ?? null;
+
+  /**
+   * ★ 原图取自货源商品详情，不取任务详情的 `assets[]`。
+   *   后端 `GET /ai-tasks/{id}` 构造 AiTaskDetailVo 时 `assets` 是硬编码的 `[]`
+   *   （见 backend/app/api/v1/ai_tasks.py 里 `AiTaskDetailVo(..., assets=[])` 那一行），
+   *   照它渲染的话「原图」栏永远是「暂无原图」。
+   */
+  const sourceProductQuery = useQuery({
+    queryKey: ['source-products', detail?.source_product_id],
+    queryFn: () => getSourceProduct(detail?.source_product_id as number),
+    enabled: typeof detail?.source_product_id === 'number',
+  });
   const rawAssets = useMemo(
-    () => (detail?.assets ?? []).filter((item) => item.origin === 'raw'),
-    [detail],
+    () => (sourceProductQuery.data?.assets ?? []).filter((item) => item.origin === 'raw'),
+    [sourceProductQuery.data],
   );
   const reworkedAssets = result?.output_assets ?? [];
 
@@ -251,10 +274,15 @@ export default function AiTasks(): JSX.Element {
   return (
     <PageContainer
       title="AI 重构任务"
-      subTitle="审核通过（approved）是上架引用素材的前置条件；未审核素材提交上架将被 422 / code 4005 硬拦截"
+      subTitle="审核通过（approved）是上架引用素材的前置条件；未审核素材提交上架将被 422 / code 4005 硬拦截。要发起新的 AI 任务（图片重绘 / 标题建议 / 视频脚本）请去「AI 内容工作台」"
       loading={listQuery.isLoading}
       extra={
         <Space>
+          <Link to="/ai-studio">
+            <Button type="primary" icon={<ThunderboltOutlined />}>
+              AI 内容工作台
+            </Button>
+          </Link>
           <Button
             icon={<SettingOutlined />}
             onClick={() => {
@@ -296,7 +324,7 @@ export default function AiTasks(): JSX.Element {
       <Table<AiTaskVo>
         rowKey="id"
         size="small"
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1530 }}
         columns={columns}
         dataSource={listQuery.data?.items ?? []}
         pagination={{ ...tablePagination, total: listQuery.data?.total ?? 0 }}
@@ -374,6 +402,10 @@ export default function AiTasks(): JSX.Element {
               <Descriptions.Item label="审核状态">
                 <StatusTag enumKey="ReviewStatus" value={result?.review_status ?? 'pending'} />
               </Descriptions.Item>
+              <Descriptions.Item label="任务类型">
+                <StatusTag enumKey="AiTaskType" value={detail.task_type} />
+              </Descriptions.Item>
+              <Descriptions.Item label="AI 客户端">{detail.ai_client || '-'}</Descriptions.Item>
               <Descriptions.Item label="目标平台">
                 <StatusTag enumKey="Platform" value={detail.target_platform} />
               </Descriptions.Item>
@@ -381,6 +413,15 @@ export default function AiTasks(): JSX.Element {
               <Descriptions.Item label="创建人">{detail.created_by ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="创建时间">{formatTime(detail.created_at)}</Descriptions.Item>
             </Descriptions>
+
+            {detail.input_prompt ? (
+              <>
+                <Typography.Title level={5}>提交时带的提示词</Typography.Title>
+                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
+                  {JSON.stringify(detail.input_prompt, null, 2)}
+                </Typography.Paragraph>
+              </>
+            ) : null}
 
             {detail.error_message ? (
               <Alert
@@ -479,6 +520,31 @@ export default function AiTasks(): JSX.Element {
                     { title: '属性值', dataIndex: 'attr_value' },
                   ]}
                 />
+
+                {result.output_title_candidates.length > 0 ||
+                result.output_video_script !== null ? (
+                  <>
+                    <Divider orientation="left" plain style={{ margin: '16px 0 12px' }}>
+                      新能力产出
+                    </Divider>
+                    <Tabs
+                      items={[
+                        {
+                          key: 'title',
+                          label: `标题候选（${result.output_title_candidates.length}）`,
+                          children: (
+                            <TitleCandidatesPanel taskId={detail.id} result={result} />
+                          ),
+                        },
+                        {
+                          key: 'video',
+                          label: '视频脚本',
+                          children: <VideoScriptPanel result={result} />,
+                        },
+                      ]}
+                    />
+                  </>
+                ) : null}
 
                 <Typography.Title level={5} style={{ marginTop: 16 }}>
                   审核操作

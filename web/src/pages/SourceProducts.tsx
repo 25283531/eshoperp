@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
@@ -13,6 +13,7 @@ import {
   Modal,
   Select,
   Space,
+  Spin,
   Statistic,
   Table,
   Tabs,
@@ -50,13 +51,16 @@ import {
 } from '@/api/catalog';
 import { createAiTasks } from '@/api/ai';
 import { triggerDownload } from '@/api/client';
+import { getTask } from '@/api/system';
 import type {
   AssetVo,
+  CollectFailedVo,
   CsvImportFailedRowVo,
   CsvImportResultVo,
   SourceProductVo,
   SourceSkuVo,
   SupplierVo,
+  TaskRecordVo,
 } from '@/api/types';
 import PageContainer from '@/components/PageContainer';
 import MoneyText from '@/components/MoneyText';
@@ -138,6 +142,174 @@ const CSV_FAILED_COLUMNS: ColumnsType<CsvImportFailedRowVo> = [
   { title: '失败原因', dataIndex: 'reason' },
 ];
 
+// ---------------------------------------------------------------------------
+// 1688 采集结果：逐条失败的识别与处置建议
+// ---------------------------------------------------------------------------
+
+/** 任务进入终态即停止轮询 */
+const TERMINAL_TASK_STATUS: string[] = ['success', 'failed', 'cancelled'];
+
+/** 后端判定"这条链接里没有商品 ID"时给的文案（backend/app/utils/kit.py） */
+const REASON_NO_PRODUCT_ID = '无法从链接中识别商品 ID';
+/** 后端判定"应用没开通这个接口"时给的文案片段（backend/app/adapters/source/alibaba1688.py） */
+const REASON_NO_PERMISSION = '未被授予该接口';
+
+/**
+ * 按失败原因给出下一步该怎么做的建议。
+ *
+ * ★ 权限未开通必须单独拎出来：它不是"再试一次"能解决的，
+ *   使用者只有去开放平台申请这一条路；而链接解析失败只要重贴一条完整的就行。
+ */
+function adviceOf(reason: string): string {
+  if (reason.includes(REASON_NO_PERMISSION)) {
+    return '去 https://open.1688.com 控制台为应用申请「商品详情」接口权限，短期内改用手工录入或 CSV 导入';
+  }
+  if (reason.includes(REASON_NO_PRODUCT_ID)) {
+    return '重新复制完整的商品链接（应形如 https://detail.1688.com/offer/123456.html），或直接填纯数字商品 ID';
+  }
+  return '按原因修正后重试；若反复失败请改用手工录入或 CSV 导入';
+}
+
+const COLLECT_FAILED_COLUMNS: ColumnsType<CollectFailedVo> = [
+  {
+    title: '商品链接 / ID',
+    dataIndex: 'identifier',
+    width: 260,
+    render: (value: string | null) => (
+      <Typography.Text style={{ fontSize: 12 }}>{value ?? '-'}</Typography.Text>
+    ),
+  },
+  { title: '后端返回的原因', dataIndex: 'reason' },
+  {
+    title: '接下来怎么办',
+    key: 'advice',
+    width: 320,
+    render: (_value: unknown, record) => (
+      <Typography.Text type="secondary">{adviceOf(record.reason)}</Typography.Text>
+    ),
+  },
+];
+
+/** 从异步任务记录的 result_json 里安全地取逐条失败明细 */
+function collectFailedOf(task: TaskRecordVo | undefined): CollectFailedVo[] {
+  const raw = task?.result_json?.failed;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const row = item as Record<string, unknown>;
+    return [{ identifier: String(row.identifier ?? '') || null, reason: String(row.reason ?? '') }];
+  });
+}
+
+/** 从异步任务记录的 result_json 里安全地取计数 */
+function countOf(task: TaskRecordVo | undefined, key: string): number {
+  const raw = task?.result_json?.[key];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * 采集任务的结果面板（`POST /source-products/collect` 返回的 `task_record_id` 指向的异步任务）。
+ *
+ * ★ 关键：**不能只看 `status`**。
+ *   后端 handler 只有在"一条都没采到且 failed 非空"时才把任务标成 `failed`；
+ *   部分成功时 status 是 `success`，失败明细藏在 `result_json.failed[]` 里。
+ *   只看 status 就会把"10 条里挂了 8 条"显示成采集成功。
+ */
+function CollectTaskResult(props: {
+  task: TaskRecordVo | undefined;
+  onAgain: () => void;
+}): JSX.Element {
+  const { task, onAgain } = props;
+
+  if (!task) return <Spin tip="加载任务状态…" />;
+
+  const finished = TERMINAL_TASK_STATUS.includes(String(task.status ?? ''));
+  const failed = collectFailedOf(task);
+  const permissionBlocked = failed.filter((item) => item.reason.includes(REASON_NO_PERMISSION));
+  const created = countOf(task, 'created');
+  const updated = countOf(task, 'updated');
+
+  return (
+    <>
+      <Space size={24} style={{ marginBottom: 12 }} wrap>
+        <span>
+          任务状态：<StatusTag enumKey="TaskStatus" value={task.status} />
+        </span>
+        <Statistic title="受理条数" value={countOf(task, 'accepted')} />
+        <Statistic title="新建商品" value={created} valueStyle={{ color: created > 0 ? '#3f8600' : undefined }} />
+        <Statistic title="更新商品" value={updated} valueStyle={{ color: updated > 0 ? '#1677ff' : undefined }} />
+        <Statistic
+          title="失败条数"
+          value={failed.length}
+          valueStyle={{ color: failed.length > 0 ? '#cf1322' : undefined }}
+        />
+      </Space>
+
+      {finished ? null : (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="正在后台采集"
+          description="1688 接口较慢时可能需要一两分钟。本页每 3 秒自动刷新一次，不用手动点。"
+        />
+      )}
+
+      {task.error_message ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="任务报错"
+          description={task.error_message}
+        />
+      ) : null}
+
+      {permissionBlocked.length > 0 ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="1688 应用未开通「商品详情」接口权限"
+          description={
+            <Space direction="vertical" size={4}>
+              <span>
+                {permissionBlocked.length} 条因为这个原因采集失败。这不是链接写错，
+                <strong>重试多少次都一样</strong>。
+              </span>
+              <span>
+                要去开放平台控制台为这个应用申请「商品详情」接口权限：
+                <Typography.Link href="https://open.1688.com" target="_blank">
+                  https://open.1688.com
+                </Typography.Link>
+              </span>
+              <span>
+                权限下来之前，请用「批量导入 CSV」或「手工录入」准备货源商品，两者不依赖外部平台。
+              </span>
+            </Space>
+          }
+        />
+      ) : null}
+
+      {failed.length > 0 ? (
+        <Table<CollectFailedVo>
+          rowKey={(record, index) => `${record.identifier}-${record.reason}-${index ?? 0}`}
+          size="small"
+          pagination={{ pageSize: 10 }}
+          columns={COLLECT_FAILED_COLUMNS}
+          dataSource={failed}
+        />
+      ) : finished ? (
+        <Alert type="success" showIcon message="全部采集成功，没有失败项" />
+      ) : null}
+
+      <Divider style={{ margin: '16px 0 12px' }} />
+      <Button onClick={onAgain}>继续粘贴下一条</Button>
+    </>
+  );
+}
+
 /**
  * P2 货源商品库。
  * 素材库（P3）已并入商品详情 Drawer：原始 / 重构 Tab + 版本切换 + 批量下载。
@@ -156,6 +328,14 @@ export default function SourceProducts(): JSX.Element {
   const [manualOpen, setManualOpen] = useState<boolean>(false);
   /** 待上传的 CSV 文件（不走 Upload 自动上传，点「开始导入」才提交） */
   const [csvFile, setCsvFile] = useState<File | null>(null);
+  /**
+   * 本次采集对应的异步任务记录 ID。
+   *
+   * ★ `POST /source-products/collect` 是**无条件受理**的 202：链接能不能解析、
+   *   1688 给不给权限，都得等异步任务跑完才知道。以前 UI 拿到 202 就弹「已受理」然后关窗口，
+   *   结果是一条都搜不出来还不知道为啥 —— 静默失效。现在把任务号留下，弹窗里轮询到终态。
+   */
+  const [collectTaskId, setCollectTaskId] = useState<number | null>(null);
   /** CSV 导入逐行结果（保留在弹窗内供查看，不只用 toast 一闪而过） */
   const [importResult, setImportResult] = useState<CsvImportResultVo | null>(null);
   const [activeTab, setActiveTab] = useState<string>('products');
@@ -230,12 +410,33 @@ export default function SourceProducts(): JSX.Element {
     mutationFn: (identifiers: string[]) =>
       collectSourceProducts({ source: '1688', identifiers }),
     onSuccess: (data) => {
-      message.success(`已受理 ${data.accepted} 个商品，任务记录 #${data.task_record_id}`);
-      setCollectOpen(false);
+      message.success(`已受理 ${data.accepted} 个，正在后台采集（任务 #${data.task_record_id}）`);
       collectForm.resetFields();
-      void queryClient.invalidateQueries({ queryKey: ['source-products'] });
+      setCollectTaskId(data.task_record_id);
     },
   });
+
+  /**
+   * ★ 轮询采集进度与逐条结果（`GET /tasks/{id}`）。
+   *   弹窗不关、结果不只用一句 toast 带走 —— 他要知道"哪条成了、哪条为什么没成"。
+   */
+  const collectTaskQuery = useQuery({
+    queryKey: ['tasks', collectTaskId],
+    queryFn: () => getTask(collectTaskId as number),
+    enabled: collectTaskId !== null,
+    refetchInterval: (query) => {
+      const status = String(query.state.data?.status ?? '');
+      return TERMINAL_TASK_STATUS.includes(status) ? false : 3_000;
+    },
+  });
+
+  /** 采集任务跑到终态时刷新商品列表（进行中也刷意义不大，徒增请求） */
+  useEffect(() => {
+    const status = String(collectTaskQuery.data?.status ?? '');
+    if (collectTaskId !== null && TERMINAL_TASK_STATUS.includes(status)) {
+      void queryClient.invalidateQueries({ queryKey: ['source-products'] });
+    }
+  }, [collectTaskId, collectTaskQuery.data?.status, queryClient]);
 
   /**
    * CSV 批量导入。
@@ -824,41 +1025,63 @@ export default function SourceProducts(): JSX.Element {
 
       {/* 采集弹窗（★ 走 1688 开放接口，未配置 AppKey / AccessToken 时必然 0 条） */}
       <Modal
-        title="采集 1688 商品"
+        title={collectTaskId === null ? '采集 1688 商品（粘贴链接或商品 ID）' : '采集任务进展'}
         open={collectOpen}
-        onCancel={() => setCollectOpen(false)}
-        onOk={() => collectForm.submit()}
-        confirmLoading={collectMutation.isPending}
-        okText="提交采集"
-        cancelText="取消"
-      >
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="采集依赖 1688 开放接口资质"
-          description="未配置 1688 AppKey / AccessToken 时，提交会受理成功但**拿不到任何数据**（0 条且不报错）。没有资质请改用「批量导入 CSV」或「手工录入」，两者不依赖外部平台。"
-        />
-        <Form form={collectForm} layout="vertical" onFinish={(values: CollectFormValues) => {
-          const identifiers = values.identifiers
-            .split(/[\n,\s]+/)
-            .map((item) => item.trim())
-            .filter(Boolean);
-          if (identifiers.length === 0) {
-            message.warning('请至少填写 1 个商品 ID 或链接');
-            return;
+        width={860}
+        onCancel={() => {
+          setCollectOpen(false);
+          setCollectTaskId(null);
+        }}
+        onOk={() => {
+          if (collectTaskId === null) collectForm.submit();
+          else {
+            setCollectOpen(false);
+            setCollectTaskId(null);
           }
-          collectMutation.mutate(identifiers.slice(0, 50));
-        }}>
-          <Form.Item
-            name="identifiers"
-            label="商品 ID 或链接"
-            extra="支持换行 / 逗号分隔，单次最多 50 个"
-            rules={[{ required: true, message: '请填写商品 ID 或链接' }]}
-          >
-            <Input.TextArea rows={6} placeholder="https://detail.1688.com/offer/123456.html" />
-          </Form.Item>
-        </Form>
+        }}
+        confirmLoading={collectMutation.isPending}
+        okText={collectTaskId === null ? '提交采集' : '关闭'}
+        cancelText="取消"
+        destroyOnHidden
+      >
+        {collectTaskId === null ? (
+          <>
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="采集依赖 1688 开放接口资质"
+              description="提交后能否真的拿到数据，要看 1688 是否给这个应用开通了「商品详情」接口权限。没开通时，「采集任务进展」会逐条列出失败原因并说明该去哪里申请；短期内请改用「批量导入 CSV」或「手工录入」，两者不依赖外部平台。"
+            />
+            <Form form={collectForm} layout="vertical" onFinish={(values: CollectFormValues) => {
+              const identifiers = values.identifiers
+                .split(/[\n,\s]+/)
+                .map((item) => item.trim())
+                .filter(Boolean);
+              if (identifiers.length === 0) {
+                message.warning('请至少填写 1 个商品 ID 或链接');
+                return;
+              }
+              collectMutation.mutate(identifiers.slice(0, 50));
+            }}>
+              <Form.Item
+                name="identifiers"
+                label="1688 商品链接或商品 ID"
+                extra={
+                  <Space direction="vertical" size={2}>
+                    <span>直接粘贴 1688 商品详情页链接即可，例如 https://detail.1688.com/offer/123456.html</span>
+                    <span>支持换行 / 逗号分隔，单次最多 50 个；也可以只填纯数字商品 ID</span>
+                  </Space>
+                }
+                rules={[{ required: true, message: '请填写商品链接或商品 ID' }]}
+              >
+                <Input.TextArea rows={6} placeholder="https://detail.1688.com/offer/123456.html" />
+              </Form.Item>
+            </Form>
+          </>
+        ) : (
+          <CollectTaskResult task={collectTaskQuery.data} onAgain={() => setCollectTaskId(null)} />
+        )}
       </Modal>
 
       {/* CSV 批量导入（★ 主入口；逐行回执） */}

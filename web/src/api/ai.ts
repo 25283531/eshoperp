@@ -12,6 +12,7 @@ import type {
   AiTaskDetailVo,
   AiTaskResultVo,
   AiTaskVo,
+  AiTitleSelectBody,
   PageResult,
 } from './types';
 
@@ -43,6 +44,22 @@ export function cancelAiTask(id: number): Promise<{ id: number; status: string }
 /** POST /ai-tasks/{id}/review */
 export function reviewAiTask(id: number, body: AiReviewBody): Promise<AiTaskResultVo> {
   return http.post<AiTaskResultVo>(`/ai-tasks/${id}/review`, body);
+}
+
+/**
+ * POST /ai-tasks/{id}/select-title —— 选定某条标题候选。
+ *
+ * ★ 为什么必须有这一步：选中后 `output_title` 才变成那条候选，
+ *   而 `output_title` 是发布链路读标题的唯一字段 —— 不选定，
+ *   "AI 出候选 → 人工挑 → 上架用挑中的那条"这条闭环就断在中途。
+ *
+ * @param body `index` 按下标选（推荐）；`title` 按标题原文精确匹配（兜底）；两者皆空后端 422
+ */
+export function selectAiTitleCandidate(
+  id: number,
+  body: AiTitleSelectBody,
+): Promise<AiTaskResultVo> {
+  return http.post<AiTaskResultVo>(`/ai-tasks/${id}/select-title`, body);
 }
 
 /** GET /ai-tasks/concurrency-config */

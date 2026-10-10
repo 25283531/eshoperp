@@ -6,6 +6,7 @@ import {
   DashboardOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
+  ExperimentOutlined,
   LockOutlined,
   NodeIndexOutlined,
   CloudUploadOutlined,
@@ -18,6 +19,7 @@ import {
 } from '@ant-design/icons';
 
 import AiTasks from './pages/AiTasks';
+import AiStudio from './pages/AiStudio';
 import AfterSales from './pages/AfterSales';
 import AuditLogs from './pages/AuditLogs';
 import Dashboard from './pages/Dashboard';
@@ -53,8 +55,9 @@ export interface MenuGroup {
 
 /**
  * 路由 + 菜单的唯一配置源。
- * 共 13 个页面：原 18 页中 5 个合并为 Tab / Drawer（素材库、AI 审核、
- * 半自动素材包、售后），P17 权限与越权告警按 PM 要求**保留独立页面**。
+ * 共 14 个页面：原 18 页中 5 个合并为 Tab / Drawer（素材库、AI 审核、
+ * 半自动素材包、售后），P17 权限与越权告警按 PM 要求**保留独立页面**，
+ * 另新增 `/ai-studio`（AI 内容工作台：三种新能力的发起与取用界面）。
  */
 export const menuGroups: MenuGroup[] = [
   {
@@ -69,6 +72,12 @@ export const menuGroups: MenuGroup[] = [
         element: <SourceProducts />,
       },
       { path: '/ai-tasks', label: 'AI 重构任务', icon: <RobotOutlined />, element: <AiTasks /> },
+      {
+        path: '/ai-studio',
+        label: 'AI 内容工作台',
+        icon: <ExperimentOutlined />,
+        element: <AiStudio />,
+      },
     ],
   },
   {

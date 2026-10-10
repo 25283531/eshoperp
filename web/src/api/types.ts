@@ -275,9 +275,29 @@ export interface CollectBody {
   identifiers: string[];
 }
 
+/**
+ * POST /source-products/collect（202）返回体。
+ *
+ * ★ 它是**无条件受理**的：链接能否解析、1688 有没有给权限，都要等异步任务跑完才知道。
+ *   所以前端不能拿 `accepted` 当"采集成功"，必须轮询任务记录读明细。
+ */
 export interface AcceptedTaskVo {
   accepted: number;
   task_record_id: number;
+  source?: string;
+  hint?: string;
+}
+
+/**
+ * 采集异步任务里逐条的失败明细（`GET /tasks/{id}` 的 `result_json.failed[]`）。
+ *
+ * ★ `reason` 是后端给的可读中文，其中两类需要前端单独识别并给出不同处置建议：
+ *     「无法从链接中识别商品 ID」——链接没复制完整；
+ *     「未被授予该接口的调用权限」——1688 应用没开通商品详情接口，只能走手工录入 / CSV。
+ */
+export interface CollectFailedVo {
+  identifier: string | null;
+  reason: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +339,17 @@ export interface AiTaskVo {
   source_product_id: number;
   source_product_title: string;
   target_platform: string;
+  /**
+   * ★ AI 任务类型（AiTaskType）：回答"这条任务要产出什么"。
+   *   ai_rework 图文重构（存量默认值）/ image_redraw 图片重绘 /
+   *   title_suggest 商品标题建议 / video_script 短视频拍摄脚本建议。
+   *   与异步队列类型 TaskType 是两个维度，别混用。
+   */
+  task_type: string;
+  /** 实际执行该任务的 AI 客户端（mock / file_bridge / http） */
+  ai_client: string;
+  /** 提交时带的提示词（AiInputPrompt 落库原样：global_prompt / images / title_prompt / video_script_prompt） */
+  input_prompt: Record<string, unknown> | null;
   rework_items: string[];
   template_version: string | null;
   status: string;
@@ -336,6 +367,71 @@ export interface BannedWordVo {
   suggestion: string | null;
 }
 
+/** ★ 单条商品标题候选（`title_suggest` 产出的一条） */
+export interface AiTitleCandidateVo {
+  title: string;
+  selling_points: string[];
+  /** 风格（如「促销感」「专业测评风」）—— 他要靠这个区分候选 */
+  style: string;
+  /** 为什么这么写 */
+  reason: string;
+  /** 适配平台的说明 */
+  platform_fit: string;
+  /** 评分 */
+  score: number;
+  /** 命中的违禁词（逐条候选各自可能命中不同的词） */
+  banned_words: string[];
+  /** 标题字数：平台对标题有硬上限，选中前就要能看出超没超 */
+  char_count: number;
+}
+
+/** ★ 短视频脚本的一个分镜 */
+export interface AiVideoScriptSceneVo {
+  index: number;
+  duration_sec: number;
+  /** 画面描述 */
+  shot: string;
+  /** 机位 */
+  camera: string;
+  /** 拍摄要点 */
+  shooting_tips: string;
+  /** 口播台词 */
+  narration: string;
+}
+
+/**
+ * ★ 短视频拍摄脚本（只含文案，不含任何视频文件路径 —— 视频由他自己拍）。
+ * 没有脚本时后端返回 null（不是空壳），前端据此判断"有没有产出"。
+ */
+export interface AiVideoScriptVo {
+  title: string;
+  /** 拍摄风格（回填使用者提交时的 video_script_prompt） */
+  style: string;
+  scenes: AiVideoScriptSceneVo[];
+  total_duration_sec: number;
+  scene_count: number;
+  /** 渲染好的纯文本，可直接照着拍 */
+  text: string;
+}
+
+/** ★ 逐图提示词入参（图片重绘：每张图可单独给一句，留空则回落到全局提示词） */
+export interface AiImagePromptIn {
+  /** 图片下标，与提交给后端的素材顺序一致（0 起） */
+  index: number;
+  prompt: string;
+  asset_id: number | null;
+  source_path: string;
+  /** main_image / detail_image */
+  tag: string;
+}
+
+/** POST /ai-tasks/{id}/select-title 请求体：index 优先，title 精确匹配兜底，两者皆空后端 422 */
+export interface AiTitleSelectBody {
+  index?: number;
+  title?: string;
+  note?: string;
+}
+
 export interface AiTaskResultVo {
   id: number;
   ai_task_id: number;
@@ -344,6 +440,14 @@ export interface AiTaskResultVo {
   output_attributes_json: Record<string, unknown> | null;
   banned_words: BannedWordVo[];
   output_assets: AssetVo[];
+  /** ★ 标题候选列表（`title_suggest` 产出；其余能力为空数组） */
+  output_title_candidates: AiTitleCandidateVo[];
+  /** ★ 短视频脚本（`video_script` 产出；其余能力为 null） */
+  output_video_script: AiVideoScriptVo | null;
+  /** ★ 选中留痕：选了第几条 / 什么时候 / 谁（从未选过则全为 null） */
+  selected_title_index: number | null;
+  selected_title_at: IsoTimeStr | null;
+  selected_title_by: string | null;
   review_status: string;
   review_note: string | null;
   reviewed_by: string | null;
@@ -362,11 +466,26 @@ export interface AiTaskCreateBody {
   target_platform: string;
   rework_items: string[];
   template_version?: string;
+  /**
+   * ★ AI 任务类型（AiTaskType）。不传则后端取 `ai_rework`（老调用方行为不变）。
+   *   image_redraw 图片重绘 / title_suggest 商品标题建议 / video_script 短视频脚本建议。
+   */
+  task_type?: string;
+  /** ★ 全局提示词：逐图未单独指定时回落到此 */
+  global_prompt?: string;
+  /** ★ 逐图提示词（图片重绘：每张图一句） */
+  image_prompts?: AiImagePromptIn[];
+  /** ★ 标题建议的补充要求（风格 / 热词倾向） */
+  title_prompt?: string;
+  /** ★ 短视频脚本的拍摄风格 / 内容倾向 */
+  video_script_prompt?: string;
 }
 
 export interface AiTaskCreateVo {
   task_ids: number[];
   task_record_ids: number[];
+  /** 后端回显的实际生效任务类型 */
+  task_type?: string;
 }
 
 export interface AiReviewBody {

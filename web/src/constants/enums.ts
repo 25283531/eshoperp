@@ -192,6 +192,33 @@ export const ORDER_STATUS_OPTIONS: EnumOption[] = [
   { value: 'cancelled', label: '已取消' },
 ];
 
+/**
+ * AI 任务类型（AiTaskType）：回答"这条 AI 任务要产出什么"。
+ *
+ * ★ 与 `AiTaskStatus`（执行状态）是两个维度，不要混用。
+ * ★ `ai_rework` 是存量数据的默认值，排在第一个。
+ */
+export const AI_TASK_TYPE_OPTIONS: EnumOption[] = [
+  { value: 'ai_rework', label: '图文重构' },
+  { value: 'image_redraw', label: '图片重绘' },
+  { value: 'title_suggest', label: '商品标题建议' },
+  { value: 'video_script', label: '短视频脚本建议' },
+];
+
+/**
+ * 素材类型（AssetType）。
+ *
+ * ★★ 这是前端区分「主图 / 详情页」的**唯一可靠依据** ★★
+ *    后端 `AssetVo` 会把 `tags_json` 拍平成 `tags: string[]`（`image_role` / `index`
+ *    这些同层字段不透出），`storage_path` 的文件命名规则也还在改成中文目录 ——
+ *    任何一种"按文件名猜角色"的写法都会在后端换命名那天崩掉。
+ */
+export const ASSET_TYPE_OPTIONS: EnumOption[] = [
+  { value: 'main_image', label: '主图' },
+  { value: 'detail_image', label: '详情图' },
+  { value: 'video', label: '视频' },
+];
+
 export const AI_TASK_STATUS_OPTIONS: EnumOption[] = [
   { value: 'queued', label: '排队中' },
   { value: 'running', label: '执行中' },
@@ -462,6 +489,7 @@ export const ENUM_FALLBACK: EnumsMap = {
   PurchaseStatus: PURCHASE_STATUS_OPTIONS,
   WritebackStatus: WRITEBACK_STATUS_OPTIONS,
   CredentialStatus: CREDENTIAL_STATUS_OPTIONS,
+  AiTaskType: AI_TASK_TYPE_OPTIONS,
   AiTaskStatus: AI_TASK_STATUS_OPTIONS,
   ReviewStatus: REVIEW_STATUS_OPTIONS,
   ConflictType: CONFLICT_TYPE_OPTIONS,
@@ -472,6 +500,7 @@ export const ENUM_FALLBACK: EnumsMap = {
   ExceptionType: EXCEPTION_TYPE_OPTIONS,
   ChangeSource: CHANGE_SOURCE_OPTIONS,
   AssetOrigin: ASSET_ORIGIN_OPTIONS,
+  AssetType: ASSET_TYPE_OPTIONS,
   TaskStatus: TASK_STATUS_OPTIONS,
   Responsibility: RESPONSIBILITY_OPTIONS,
   AfterSaleStatus: AFTER_SALE_STATUS_OPTIONS,
@@ -525,6 +554,12 @@ export const STATUS_TAG_COLORS: Record<string, Record<string, string>> = {
     invalid: 'red',
     archived: 'default',
   },
+  AiTaskType: {
+    ai_rework: 'default',
+    image_redraw: 'blue',
+    title_suggest: 'purple',
+    video_script: 'cyan',
+  },
   AiTaskStatus: {
     queued: 'default',
     running: 'processing',
@@ -533,6 +568,11 @@ export const STATUS_TAG_COLORS: Record<string, Record<string, string>> = {
     rejected: 'red',
     failed: 'red',
     cancelled: 'default',
+  },
+  AssetType: {
+    main_image: 'blue',
+    detail_image: 'cyan',
+    video: 'purple',
   },
   ReviewStatus: {
     pending: 'gold',
