@@ -49,6 +49,8 @@ interface AiTaskFilterValues {
   status: string;
   target_platform: string;
   source_product_id: string;
+  /** ★ AI 能力种类（`AiTaskType`），后端已支持筛选 */
+  task_type: string;
 }
 
 interface ReviewFormValues {
@@ -66,6 +68,7 @@ const DEFAULT_FILTERS: AiTaskFilterValues = {
   status: '',
   target_platform: '',
   source_product_id: '',
+  task_type: '',
 };
 
 /** 违禁词高亮：命中的词加红色下划线标记 */
@@ -97,6 +100,7 @@ export default function AiTasks(): JSX.Element {
     usePagination<AiTaskFilterValues>(DEFAULT_FILTERS);
   const statusOptions = useEnumOptions('AiTaskStatus');
   const platformOptions = useEnumOptions('Platform');
+  const taskTypeOptions = useEnumOptions('AiTaskType');
 
   const [detailId, setDetailId] = useState<number | null>(null);
   const [editMode, setEditMode] = useState<boolean>(false);
@@ -246,21 +250,28 @@ export default function AiTasks(): JSX.Element {
   const result = detail?.result ?? null;
 
   /**
-   * ★ 原图取自货源商品详情，不取任务详情的 `assets[]`。
-   *   后端 `GET /ai-tasks/{id}` 构造 AiTaskDetailVo 时 `assets` 是硬编码的 `[]`
-   *   （见 backend/app/api/v1/ai_tasks.py 里 `AiTaskDetailVo(..., assets=[])` 那一行），
-   *   照它渲染的话「原图」栏永远是「暂无原图」。
+   * ★ 原图优先取任务详情的 `assets[]`（后端已补齐：同一条 SQL 同时捞出
+   *   `origin=raw` 的原图与 `origin=ai_rework` 的产出图，靠 `origin` 区分）。
+   *   商品详情的 `assets` 仅作兜底 —— 它在老版本后端上才有值。
    */
+  const detailRawAssets = useMemo(
+    () => (detail?.assets ?? []).filter((item) => item.origin === 'raw'),
+    [detail],
+  );
   const sourceProductQuery = useQuery({
     queryKey: ['source-products', detail?.source_product_id],
     queryFn: () => getSourceProduct(detail?.source_product_id as number),
-    enabled: typeof detail?.source_product_id === 'number',
+    // ★ 详情已给全就不再多打一次商品详情接口（详情抽屉是轮询热点）
+    enabled: typeof detail?.source_product_id === 'number' && detailRawAssets.length === 0,
   });
-  const rawAssets = useMemo(
-    () => (sourceProductQuery.data?.assets ?? []).filter((item) => item.origin === 'raw'),
-    [sourceProductQuery.data],
-  );
-  const reworkedAssets = result?.output_assets ?? [];
+  const rawAssets = useMemo(() => {
+    if (detailRawAssets.length > 0) return detailRawAssets;
+    return (sourceProductQuery.data?.assets ?? []).filter((item) => item.origin === 'raw');
+  }, [detailRawAssets, sourceProductQuery.data]);
+  const reworkedAssets = useMemo(() => {
+    const fromDetail = (detail?.assets ?? []).filter((item) => item.origin === 'ai_rework');
+    return fromDetail.length > 0 ? fromDetail : (result?.output_assets ?? []);
+  }, [detail, result]);
 
   const attributeRows = useMemo(() => {
     if (!result?.output_attributes_json) return [];
@@ -313,6 +324,19 @@ export default function AiTasks(): JSX.Element {
         </Form.Item>
         <Form.Item name="source_product_id" label="货源商品 ID">
           <Input allowClear placeholder="如 123" style={{ width: 140 }} />
+        </Form.Item>
+        {/*
+         * ★ 任务类型筛选：后端 `GET /ai-tasks` 的 `task_type` 此前不被识别，
+         *   前端传了会被静默忽略（返回未筛选的结果集，使用者以为筛了其实没有）。
+         *   后端现已支持，这里补上控件。
+         */}
+        <Form.Item name="task_type" label="任务类型">
+          <Select
+            allowClear
+            placeholder="全部"
+            style={{ width: 170 }}
+            options={taskTypeOptions}
+          />
         </Form.Item>
         <Form.Item>
           <Button type="primary" htmlType="submit">
@@ -469,7 +493,10 @@ export default function AiTasks(): JSX.Element {
                         ))}
                       </div>
                     ) : (
-                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无原图" />
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="暂无原图（可到「AI 内容工作台」手工上传素材）"
+                      />
                     )}
                   </Col>
                   <Col span={12}>

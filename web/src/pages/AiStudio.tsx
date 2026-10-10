@@ -8,10 +8,12 @@
  *
  * ★★ 诚实边界（重要，不要删）★★
  *   使用者的 1688 应用**尚未开通商品详情接口权限**，现在采不到真实商品数据。
- *   本页能验证的是：素材分组渲染正确 / 逐图提示词能正确组装成
- *   `image_prompts[{index,prompt,asset_id,source_path,tag}]` 提交给后端 /
+ *   因此本页的素材**不再依赖采集**：走 `POST /assets/upload` 手工上传进系统
+ *   —— 这是权限开通前唯一可用的图片入口，"上传 → 逐图提示词 → 重绘"已可闭环。
+ *   本页能验证的是：素材按 `image_role` 分组、按 `index` 编序渲染正确 /
+ *   逐图提示词能正确组装成 `image_prompts[{index,prompt,asset_id,source_path,tag}]` /
  *   三种产出能正确取回并与 select-title 闭环。
- *   **端到端的真实 1688 数据链路未跑通**，原因就是上面这条权限限制。
+ *   **真实 1688 采集链路仍未跑通**，原因就是上面这条权限限制；手工上传不等于采集已通。
  */
 import { useMemo, useState } from 'react';
 import {
@@ -41,6 +43,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createAiTasks, getAiTask, listAiTasks } from '@/api/ai';
 import { listAssets, listSourceProducts } from '@/api/catalog';
 import type { AiTaskCreateBody, AiTaskVo, AssetVo } from '@/api/types';
+import AssetUploader from '@/components/AssetUploader';
 import PageContainer from '@/components/PageContainer';
 import StatusTag from '@/components/StatusTag';
 import { TitleCandidatesPanel, VideoScriptPanel } from '@/components/AiResultPanels';
@@ -74,22 +77,63 @@ interface VideoFormValues {
 /** 一张图在界面上的位置信息 */
 interface ImageSlot {
   asset: AssetVo;
-  /** 在该商品全部图片素材中的下标（0 起），提交给后端充当 image_prompts[].index */
+  /** 提交给后端充当 image_prompts[].index —— 口径见 buildSubmissionIndex */
   index: number;
-  /** 在本组（主图 / 详情图）内的展示序号（1 起） */
+  /** 在本组（主图 / 详情图）内展示的序号（后端 `index` 为 1 起） */
   seq: number;
 }
 
-function isImageAsset(asset: AssetVo): boolean {
-  return asset.asset_type === ASSET_MAIN || asset.asset_type === ASSET_DETAIL;
+/**
+ * 素材角色：后端 `AssetVo` 现已透出 `image_role`（来自 `tags_json`）。
+ *
+ * ★ 不要按 `storage_path` 猜角色：落盘命名是「中文子目录 + 序号」，
+ *   只有后端知道那串中文，前端一猜就会在命名口径变动那天崩掉。
+ *   老数据没有 `image_role` 时回落 `asset_type`（两者取值一致）。
+ */
+function roleOf(asset: AssetVo): string {
+  return asset.image_role || asset.asset_type;
 }
 
-/** 从排序后的全部图片素材里抽出某一角色的那些，并编出组内序号（1 起） */
-function buildSlots(assets: AssetVo[], role: string): ImageSlot[] {
-  return assets
-    .map((asset, index) => ({ asset, index }))
-    .filter((slot) => slot.asset.asset_type === role)
-    .map((slot, position) => ({ asset: slot.asset, index: slot.index, seq: position + 1 }));
+function isImageAsset(asset: AssetVo): boolean {
+  const role = roleOf(asset);
+  return role === ASSET_MAIN || role === ASSET_DETAIL;
+}
+
+/**
+ * ★★ `image_prompts[].index` 的口径 —— 错位不报错，图出来才发现 ★★
+ *
+ * 后端 `AiTaskService.collect_source_image_paths()` 取原图时按 `order_by(Asset.id)`，
+ * `file_bridge._render_image_prompt_list()` 再按该顺序 `enumerate` 去匹配
+ * `p.index == index`。所以 index = **素材 id 升序里的位置**，
+ * 不是界面上"主图在前、详情图在后"的位置。
+ * 两者在「先传主图、再传详情图」时恰好一致，一旦反序上传就会错位 ——
+ * 第 3 张的提示词会被安到第 2 张上。这里以此为准，与后端同源。
+ */
+function buildSubmissionIndex(assets: AssetVo[]): Map<number, number> {
+  return new Map([...assets].sort((a, b) => a.id - b.id).map((asset, index) => [asset.id, index]));
+}
+
+/** 组内排序：后端落的 `index`（1 起）优先，缺失的老数据按 id */
+function sortInGroup(assets: AssetVo[]): AssetVo[] {
+  return [...assets].sort((a, b) => {
+    if (typeof a.index === 'number' && typeof b.index === 'number' && a.index !== b.index) {
+      return a.index - b.index;
+    }
+    return a.id - b.id;
+  });
+}
+
+/** 抽出某一角色的素材，编出组内展示序号与提交下标 */
+function buildSlots(
+  assets: AssetVo[],
+  role: string,
+  submissionIndex: Map<number, number>,
+): ImageSlot[] {
+  return sortInGroup(assets.filter((item) => roleOf(item) === role)).map((asset, position) => ({
+    asset,
+    index: submissionIndex.get(asset.id) ?? position,
+    seq: typeof asset.index === 'number' ? asset.index : position + 1,
+  }));
 }
 
 /**
@@ -173,12 +217,11 @@ export default function AiStudio(): JSX.Element {
   });
 
   /**
-   * 该商品的原始素材。
+   * 该商品的原始素材（`GET /assets?source_product_id=&origin=raw`）。
    *
-   * ★ 用 `GET /assets?source_product_id=&origin=raw` 而不是任务详情的 `assets[]`：
- *   后端 `GET /ai-tasks/{id}` 构造详情 VO 时 `assets` 恒为 `[]`
- *   （见 backend/app/api/v1/ai_tasks.py 里 `AiTaskDetailVo(..., assets=[])` 那一行），
- *   读它只能拿到空列表。
+   * ★ 为什么不用任务详情的 `assets[]`：那一栏是**某个任务**的原图 + 产出图，
+   *   而工作台要挑的是"这个商品现在有哪些原图"（含尚未参与任何任务的新上传图），
+   *   两者不是一回事。任务详情的 `assets` 后端已补齐，仅用于 AiTasks 的对比视图。
    */
   const assetsQuery = useQuery({
     queryKey: ['assets', 'studio-raw', sourceProductId],
@@ -193,21 +236,26 @@ export default function AiStudio(): JSX.Element {
   });
 
   /**
-   * 待提交的图片素材顺序：**主图在前、详情图在后**。
+   * 全部图片素材（主图 + 详情图）。
    *
-   * ★ 顺序即契约：`image_prompts[].index` 是后端据以定位"改哪张图"的唯一依据，
-   *   必须与界面展示的顺序同源，否则第 3 张的提示词会被安到第 2 张上
-   *   —— 这种错不报错，图出来才发现。
+   * ★ 顺序即契约：`image_prompts[].index` 是后端定位"改哪张图"的唯一依据，
+   *   这里按 **素材 id 升序**排（与后端 `collect_source_image_paths` 同源），
+   *   界面分组展示另走 `mainSlots` / `detailSlots`，两者允许不同序。
    */
-  const orderedImages = useMemo<AssetVo[]>(() => {
-    const assets = (assetsQuery.data?.items ?? []).filter(isImageAsset);
-    const mains = assets.filter((item) => item.asset_type === ASSET_MAIN);
-    const details = assets.filter((item) => item.asset_type === ASSET_DETAIL);
-    return [...mains, ...details];
-  }, [assetsQuery.data]);
+  const orderedImages = useMemo<AssetVo[]>(
+    () => [...(assetsQuery.data?.items ?? []).filter(isImageAsset)].sort((a, b) => a.id - b.id),
+    [assetsQuery.data],
+  );
 
-  const mainSlots = useMemo(() => buildSlots(orderedImages, ASSET_MAIN), [orderedImages]);
-  const detailSlots = useMemo(() => buildSlots(orderedImages, ASSET_DETAIL), [orderedImages]);
+  const submissionIndex = useMemo(() => buildSubmissionIndex(orderedImages), [orderedImages]);
+  const mainSlots = useMemo(
+    () => buildSlots(orderedImages, ASSET_MAIN, submissionIndex),
+    [orderedImages, submissionIndex],
+  );
+  const detailSlots = useMemo(
+    () => buildSlots(orderedImages, ASSET_DETAIL, submissionIndex),
+    [orderedImages, submissionIndex],
+  );
 
   const productOptions = (productsQuery.data?.items ?? []).map((item) => ({
     label: `#${item.id} ${item.title}`,
@@ -249,13 +297,14 @@ export default function AiStudio(): JSX.Element {
     if (sourceProductId === null) return;
     /**
      * ★ 每张图都发一条（包括没填字的），否则下标错位。
+     *   `orderedImages` 已是 id 升序，与后端取原图的顺序一致。
      */
     const imagePromptsBody = orderedImages.map((asset, index) => ({
       index,
       prompt: (promptMap[asset.id] ?? '').trim(),
       asset_id: asset.id,
       source_path: asset.storage_path,
-      tag: asset.asset_type,
+      tag: roleOf(asset),
     }));
     const globalPrompt = (values.global_prompt ?? '').trim();
     if (globalPrompt === '' && imagePromptsBody.every((item) => item.prompt === '')) {
@@ -341,6 +390,15 @@ export default function AiStudio(): JSX.Element {
 
   const previewTask = previewQuery.data;
   const previewResult = previewTask?.result ?? null;
+  /** ★ 任务详情现在会带出真实素材：原图 `origin=raw`，AI 产出 `origin=ai_rework` */
+  const previewRawAssets = useMemo(
+    () => (previewTask?.assets ?? []).filter((item) => item.origin === 'raw'),
+    [previewTask],
+  );
+  const previewAiAssets = useMemo(
+    () => (previewTask?.assets ?? []).filter((item) => item.origin === 'ai_rework'),
+    [previewTask],
+  );
 
   /** 一组素材的分区标题：数量 + 角色标签（标签文案来自 enum 字典，不硬编码） */
   const renderGroupDivider = (role: string, count: number): JSX.Element => (
@@ -370,8 +428,8 @@ export default function AiStudio(): JSX.Element {
         <Alert
           type="warning"
           showIcon
-          message="1688 商品详情接口权限尚未开通，现在采不到真实商品数据"
-          description="当前可用「手工录入货源商品」或「批量导入 CSV」准备数据来验证本页（两者都不依赖 1688 开放平台）。这条限制解除前，不要宣告本页已用真实 1688 数据验证过。"
+          message="1688 商品详情接口权限尚未开通，采集链路进不来真实商品图片"
+          description="商品可用「手工录入」或「批量导入 CSV」准备，图片用本页「上传素材」手工补传（都不依赖 1688 开放平台）。这条限制解除前，不要宣告本页已用真实 1688 数据验证过。"
         />
       }
     >
@@ -416,6 +474,12 @@ export default function AiStudio(): JSX.Element {
                   label: '图片重绘',
                   children: (
                     <Form form={imageForm} layout="vertical" onFinish={submitImageRedraw}>
+                      <Divider orientation="left" plain style={{ margin: '8px 0' }}>
+                        上传素材
+                      </Divider>
+                      {/* ★ 上传入口常驻：素材为空时它是唯一出路，有素材时用来补图 */}
+                      <AssetUploader sourceProductId={sourceProductId} />
+
                       {assetsQuery.isLoading ? (
                         <Typography.Text type="secondary">素材加载中…</Typography.Text>
                       ) : orderedImages.length === 0 ? (
@@ -424,8 +488,8 @@ export default function AiStudio(): JSX.Element {
                             <span>
                               这个商品还没有原始图片素材。
                               <br />
-                              后端目前没有图片上传端点，素材来源只有「1688 采集时下载」一条，
-                              无法手工补传。
+                              1688 采集暂时用不了（详情接口权限未开通），请用上面的「选择图片」
+                              手工上传 —— 这是当前唯一能把图片送进系统的入口。
                             </span>
                           }
                         />
@@ -616,6 +680,57 @@ export default function AiStudio(): JSX.Element {
                 message="任务执行失败"
                 description={previewTask.error_message}
               />
+            ) : null}
+
+            {/*
+             * ★ 原图对比：任务详情的 `assets` 后端已补齐（此前恒为 `[]`，
+             *   导致这一栏永远是"暂无原图"）。原图与产出图靠 `origin` 区分，
+             *   每张的 `storage_path` / `image_role` / `index` 都由后端下发，前端不猜。
+             */}
+            {previewRawAssets.length > 0 || previewAiAssets.length > 0 ? (
+              <>
+                <Typography.Title level={5}>原图 vs AI 产出</Typography.Title>
+                <Row gutter={16}>
+                  <Col span={12}>
+                    <Typography.Text strong>原图（{previewRawAssets.length} 张）</Typography.Text>
+                    {previewRawAssets.length > 0 ? (
+                      <div className="erp-compare-block">
+                        {previewRawAssets.map((asset) => (
+                          <Image
+                            key={asset.id}
+                            src={asset.preview_url ?? undefined}
+                            alt={`原图-${asset.id}`}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="暂无原图（可在本页「上传素材」手工补传）"
+                      />
+                    )}
+                  </Col>
+                  <Col span={12}>
+                    <Typography.Text strong>AI 产出（{previewAiAssets.length} 张）</Typography.Text>
+                    {previewAiAssets.length > 0 ? (
+                      <div className="erp-compare-block">
+                        {previewAiAssets.map((asset) => (
+                          <Image
+                            key={asset.id}
+                            src={asset.preview_url ?? undefined}
+                            alt={`AI产出-${asset.id}`}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="暂无 AI 产出图（任务可能还在队列里）"
+                      />
+                    )}
+                  </Col>
+                </Row>
+              </>
             ) : null}
 
             {!previewResult ? (

@@ -324,10 +324,41 @@ export interface AssetVo {
   preview_url: string | null;
   ai_task_id: number | null;
   created_at: IsoTimeStr | null;
+  /**
+   * ★ 素材角色（`tags_json.image_role`）：`main_image` / `detail_image`。
+   *   后端已透出，前端据此分组即可，不要再按 `storage_path` 的文件名猜角色
+   *   （命名口径是「中文子目录 + 序号」，且只有后端一处知道）。
+   */
+  image_role?: string | null;
+  /** ★ 角色内序号（`tags_json.index`，**1 起**：落盘文件名就是它） */
+  index?: number | null;
 }
 
 export interface BatchDownloadVo {
   download_url: string;
+}
+
+/** 上传被拒的单个文件：后端逐条给出可读中文原因 */
+export interface AssetUploadFailedItem {
+  filename: string;
+  reason: string;
+}
+
+/**
+ * POST /assets/upload 的返回体。
+ *
+ * ★ 逐文件给结论：`created` / `duplicated` / `failed` 三者互斥且**不静默丢弃** ——
+ *   使用者要能看见「这张为什么没进来」，所以 `failed` 必须逐条渲染到界面上。
+ */
+export interface AssetUploadVo {
+  role: string;
+  source_product_id: number | null;
+  created: AssetVo[];
+  duplicated: AssetVo[];
+  failed: AssetUploadFailedItem[];
+  created_count: number;
+  duplicated_count: number;
+  failed_count: number;
 }
 
 // ---------------------------------------------------------------------------

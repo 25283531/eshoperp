@@ -5,6 +5,7 @@
 import { fileUrl, http } from './client';
 import type {
   AcceptedTaskVo,
+  AssetUploadVo,
   AssetVo,
   BatchDownloadVo,
   CollectBody,
@@ -133,6 +134,44 @@ export function deleteSourceProduct(id: number): Promise<{ id: number }> {
 /** GET /assets */
 export function listAssets(params: Record<string, unknown> = {}): Promise<PageResult<AssetVo>> {
   return http.get<PageResult<AssetVo>>('/assets', params);
+}
+
+/**
+ * ★ 后端上传限制（与 `backend/app/services/asset_service.py` 顶部常量逐条对齐）。
+ *   前端拿来做**提交前**校验：让使用者在按下按钮之前就知道哪张过不了，
+ *   而不是等 10MB 传完了才收到一句"文件过大"。
+ *   后端仍会再校验一遍（前端校验只是体验，不是安全边界）。
+ */
+export const UPLOAD_MAX_FILES = 20;
+export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+export const UPLOAD_ALLOWED_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'];
+
+export interface UploadAssetsBody {
+  files: File[];
+  source_product_id: number;
+  /** main_image（主图） / detail_image（详情页） */
+  role: string;
+  onUploadProgress?: (percent: number) => void;
+}
+
+/**
+ * POST /assets/upload —— 手工上传素材图片（multipart，多文件）。
+ *
+ * ★ 1688 商品详情接口权限未开通期间，这是**唯一**能把图片送进系统的入口：
+ *   没有它，"AI 逐图重绘"这条主链路连素材都拿不到，界面永远是空的。
+ *
+ * ★ 不要手动设置 Content-Type boundary，`http.post` 检测到 FormData 会自动处理。
+ */
+export function uploadAssets(body: UploadAssetsBody): Promise<AssetUploadVo> {
+  const form = new FormData();
+  body.files.forEach((file) => {
+    form.append('files', file, file.name);
+  });
+  form.append('source_product_id', String(body.source_product_id));
+  form.append('role', body.role);
+  return http.post<AssetUploadVo>('/assets/upload', form, undefined, {
+    onUploadProgress: body.onUploadProgress,
+  });
 }
 
 /** GET /assets/{id} */

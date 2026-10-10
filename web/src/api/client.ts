@@ -93,6 +93,13 @@ const ADMIN_TOKEN: string =
  */
 export interface HttpOptions {
   admin?: boolean;
+  /**
+   * 上传进度回调（0–100）。
+   *
+   * ★ 手工上传一次最多 20 张 × 10MB，不带进度的话界面上就是一个转圈的按钮，
+   *   使用者无法判断"是卡住了还是在传"，会反复点提交。
+   */
+  onUploadProgress?: (percent: number) => void;
 }
 
 export const httpClient = axios.create({
@@ -195,6 +202,23 @@ function withAdminAuth(config: AxiosRequestConfig, options?: HttpOptions): Axios
   };
 }
 
+/**
+ * 把 `HttpOptions.onUploadProgress` 适配成 axios 的进度回调。
+ * `total` 不可知时（部分代理不回 Content-Length）axios 会传 0，此时不回报进度
+ * —— 与其显示一个假的 50%，不如什么都不显示。
+ */
+function uploadProgressHandler(
+  options?: HttpOptions,
+): ((event: { loaded: number; total?: number }) => void) | undefined {
+  const onProgress = options?.onUploadProgress;
+  if (!onProgress) return undefined;
+  return (event) => {
+    const total = event.total ?? 0;
+    if (total <= 0) return;
+    onProgress(Math.min(100, Math.round((event.loaded / total) * 100)));
+  };
+}
+
 /** 简易 HTTP 动词封装，供各 api 模块使用 */
 export const http = {
   get<T>(url: string, params?: Record<string, unknown>, options?: HttpOptions): Promise<T> {
@@ -208,7 +232,14 @@ export const http = {
   ): Promise<T> {
     return request<T>(
       withAdminAuth(
-        { method: 'POST', url, data, params, headers: multipartHeaders(data) },
+        {
+          method: 'POST',
+          url,
+          data,
+          params,
+          headers: multipartHeaders(data),
+          onUploadProgress: uploadProgressHandler(options),
+        },
         options,
       ),
     );
@@ -221,7 +252,14 @@ export const http = {
   ): Promise<T> {
     return request<T>(
       withAdminAuth(
-        { method: 'PUT', url, data, params, headers: multipartHeaders(data) },
+        {
+          method: 'PUT',
+          url,
+          data,
+          params,
+          headers: multipartHeaders(data),
+          onUploadProgress: uploadProgressHandler(options),
+        },
         options,
       ),
     );

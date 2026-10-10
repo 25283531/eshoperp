@@ -208,10 +208,11 @@ export const AI_TASK_TYPE_OPTIONS: EnumOption[] = [
 /**
  * 素材类型（AssetType）。
  *
- * ★★ 这是前端区分「主图 / 详情页」的**唯一可靠依据** ★★
- *    后端 `AssetVo` 会把 `tags_json` 拍平成 `tags: string[]`（`image_role` / `index`
- *    这些同层字段不透出），`storage_path` 的文件命名规则也还在改成中文目录 ——
- *    任何一种"按文件名猜角色"的写法都会在后端换命名那天崩掉。
+ * ★★ 这是前端区分「主图 / 详情页」的**可靠依据之一** ★★
+ *    后端 `AssetVo` 现已同层透出 `image_role`（角色）与 `index`（角色内序号，**1 起**），
+ *    需要分组与排序的地方优先用那两个字段，本表只负责把取值翻成中文标签。
+ *    仍然不要按 `storage_path` 猜角色：落盘是「中文子目录 + 序号」，
+ *    只有后端知道那串中文，前端一猜就会在命名口径变动那天崩掉。
  */
 export const ASSET_TYPE_OPTIONS: EnumOption[] = [
   { value: 'main_image', label: '主图' },
